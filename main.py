@@ -1,7 +1,7 @@
 import os
 import json
 import firebase_admin
-from firebase_admin import credentials
+from firebase_admin import credentials, auth
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import google.generativeai as genai
@@ -49,6 +49,56 @@ def generate_text():
         response = model.generate_content(prompt)
 
         return jsonify({"response": response.text})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({"error": "Missing email or password"}), 400
+
+    try:
+        user = auth.get_user_by_email(email)
+        custom_token = auth.create_custom_token(user.uid).decode("utf-8")
+
+        return jsonify({
+            "token": custom_token,
+            "user_id": user.uid
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+    print(username)
+
+
+    if not email or not password:
+        return jsonify({"error": "Missing email or password"}), 400
+
+    try:
+        user = auth.create_user(
+            display_name=username,
+            email=email,
+            password=password,
+        )
+        
+        return jsonify({
+            "message": "User registered successfully",
+            "user_id": user.uid
+        }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
