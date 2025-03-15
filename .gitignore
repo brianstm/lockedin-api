@@ -1,4 +1,9 @@
 .env
+__pycache__/
+*.pyc
+.vercel
 .DS_Store
+venv/
+.idea/
+.vscode/
 niggaching.py
-__pycache__
