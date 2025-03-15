@@ -41,7 +41,12 @@ GOOGLE_GEMINI_KEY = os.getenv("GOOGLE_GEMINI_KEY")
 genai.configure(api_key=GOOGLE_GEMINI_KEY)
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:8000",
+    "http://localhost:3000",
+    "https://lockedin-api.vercel.app",
+    "https://lockedin-rhrn.vercel.app"
+])
 
 # Global cache for app classifications
 app_classification_cache = {}
