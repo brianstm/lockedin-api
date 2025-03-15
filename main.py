@@ -28,6 +28,13 @@ cred = credentials.Certificate(firebase_credentials)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
+def gemini_generate(prompt):
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    response = model.generate_content(prompt)
+    return jsonify({
+        "response": response.text
+    })
+
 GOOGLE_GEMINI_KEY = os.getenv("GOOGLE_GEMINI_KEY")
 genai.configure(api_key=GOOGLE_GEMINI_KEY)
 
@@ -162,7 +169,7 @@ def join():
         if userID in members:
             return jsonify({"error": "User already in group"}), 400
         
-        members.append(userID) 
+        members.append(userID) # append({userId, score})
         group_ref.update({
             'members': members
         })  
@@ -195,6 +202,15 @@ def get_group(groupName):
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/quiz/generate', methods=['POST'])
+def generate_quiz():
+    data = request.json
+    sessionID = data.get('sessionId')
+    userID = data.get('userId')
+    topic = data.get('topic')
+
+
     
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
