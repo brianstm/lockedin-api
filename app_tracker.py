@@ -193,8 +193,9 @@ class ApplicationTracker:
         usage_report = {}
         for log in daily_logs:
             app_name = log['app_name']
+            window_title = log["window_title"]
             duration = log['duration']
-            usage_report[app_name] = usage_report.get(app_name, 0) + duration
+            usage_report[app_name + ": " + window_title] = usage_report.get(app_name, 0) + duration
         
         return usage_report
 
