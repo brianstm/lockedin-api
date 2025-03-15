@@ -1,8 +1,5 @@
 import os
 import json
-import time
-import threading
-from datetime import timedelta
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from dotenv import load_dotenv
@@ -32,7 +29,13 @@ cred = credentials.Certificate(firebase_credentials)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-db = firestore.client()
+def gemini_generate(prompt):
+    # Initialize the GenerativeAI model
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    response = model.generate_content(prompt)
+    return jsonify({
+        "response": response.text
+    })
 
 GOOGLE_GEMINI_KEY = os.getenv("GOOGLE_GEMINI_KEY")
 genai.configure(api_key=GOOGLE_GEMINI_KEY)
@@ -77,12 +80,11 @@ def login():
 
         return jsonify({
             "token": custom_token,
-            "userId": user.uid
+            "user_id": user.uid
         }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
     
 @app.route('/register', methods=['POST'])
 def register():
@@ -90,6 +92,8 @@ def register():
     username = data.get('username')
     email = data.get('email')
     password = data.get('password')
+    print(username)
+
 
     if not email or not password:
         return jsonify({"error": "Missing email or password"}), 400
@@ -103,169 +107,14 @@ def register():
         
         return jsonify({
             "message": "User registered successfully",
-            "userId": user.uid
+            "user_id": user.uid
         }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
 
 
-import app_tracker
-tracker = app_tracker.ApplicationTracker()
-
-def log_activity(sessionId):
-    session_ref = db.collection('sessions').document(sessionId)
-
-    report = tracker.get_daily_report()
-    activities = ""
-    for app, duration in report.items():
-        activities += f"{app}: {timedelta(seconds=duration)} \n"
-
-    session_ref.update({
-        'activities': activities,
-    })
-
-def stop_tracking(duration, sessionId):
-    time.sleep(duration * 60)
-    tracker.stop_tracking()
-    log_activity(sessionId)
-
-@app.route('/session/start', methods=['POST'])
-def startSession():
-    data = request.json
-    groupId = data.get('groupId')
-    userId = data.get('userId')
-    pomodoro = data.get('pomodoro')
-    duration = int(data.get('duration'))
-    
-    try:
-        session_data = {
-            'groupId': groupId,
-            'userId': userId,
-            'pomodoro': pomodoro,
-            'activities': "",
-        }
-
-        session_ref = db.collection('sessions').document()
-        session_ref.set(session_data)
-        
-        tracker.start_tracking()
-
-        threading.Thread(target=stop_tracking, args=(duration,session_ref.id)).start()
-
-        return jsonify({
-            "message": "Session started",
-            "sessionId": session_ref.id,
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500    
-    
-    
-@app.route('/session/end', methods=['POST'])
-def endSession():
-    data = request.json
-    sessionId = data.get('sessionId')
-    
-    try:
-        log_activity(sessionId)
-
-        tracker.stop_tracking()
-
-        session_ref = db.collection('sessions').document(sessionId)
-        session_data = session_ref.get().to_dict()
-
-        prompt = """
-            OUTPUT ONLY A FLOAT FROM 0.0 TO 10.0.
-            Evaluate the productivity score for a Computer Science student based on the following activity log. Use a grading scheme considering duration of activity where:
-            Academic-related activities (including YouTube tutorials) are considered positive.
-            Gaming, social media, and non-academic activities are considered negative.
-            All other activities are considered neutral.
-            Provide a productivity score as a float between 0.0 and 10.0, where 10.0 indicates maximum productivity. 
-            OUTPUT ONLY A FLOAT FROM 0.0 TO 10.0.
-            Activity Log: """ + session_data.get("activities")      
-        
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
-
-        productivityScore = float(response.text)
-
-        userId = session_data.get("userId")
-        groupId = session_data.get("groupId")
-        
-        group_ref = db.collection('groups').document(groupId)
-        group_data = group_ref.get().to_dict()
-
-        members = group_data.get('members')
-
-        for member in members:
-            if member.get('userId') == userId:
-                member['score'] = productivityScore
-                break
-        
-        group_ref.update({'members': members})
-
-        return jsonify({
-            "message": "Session ended",
-            "productivityScore": productivityScore,
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
-    
-
-@app.route('/activity/update', methods=['POST'])
-def updateActivity():
-    data = request.json
-    sessionId = data.get('sessionId')
-
-    try: 
-        log_activity(sessionId)
-
-        return jsonify({'message': 'Activity logged'}), 200
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-
-@app.route('/activity/<sessionId>', methods=['GET'])
-def getActivity(sessionId):
-    try:
-        log_activity(sessionId)
-
-        session_ref = db.collection('sessions').document(sessionId)
-        session_data = session_ref.get().to_dict()
-
-        return jsonify({
-            "userId": session_data.get("userId"),
-            "userActivities": session_data.get("activities"),
-        }), 200
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-
-@app.route('/leaderboard/<groupId>', methods=['GET'])
-def getLeaderboard(groupId):
-    try:
-        group_ref = db.collection('groups').document(groupId)
-        group_data = group_ref.get().to_dict()
-
-        members = group_data.get('members')
-
-        sorted_members = sorted(members, key=lambda x: x.get('score', 0), reverse=True)
-
-        return jsonify({
-            "leaderboard": sorted_members,
-        }), 200
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-
-# "GROUP MANAGEMENT"
+"GROUP MANAGEMENT"
 @app.route('/groups/create', methods=['POST'])
 def create():
     data = request.json
@@ -284,7 +133,7 @@ def create():
         group_ref.set({
             'groupName': groupName,
             'createdBy': userID,  
-            'members': [{"userId": userID, "score": 0}],  
+            'members': [userID],  
             'createdAt': firestore.SERVER_TIMESTAMP
         })
 
@@ -322,7 +171,7 @@ def join():
         if userID in members:
             return jsonify({"error": "User already in group"}), 400
         
-        members.append({'userId': userID, 'score': 0})
+        members.append(userID) # append({userId, score})
         group_ref.update({
             'members': members
         })  
