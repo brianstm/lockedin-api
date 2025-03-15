@@ -359,13 +359,57 @@ def get_group(groupName):
         return jsonify({"error": str(e)}), 500
 
 
-def gemini_generate(prompt, topic):
+def gemini_generate(prompt, topic = "" ):
     model = genai.GenerativeModel("gemini-2.0-flash")
     full_prompt = f"{prompt} {topic}"
     response = model.generate_content(full_prompt)
     return jsonify({
         "response": response.text
     })
+
+@app.route('/quiz/generate', methods=['POST'])
+def generate_quiz():
+    data = request.json
+    sessionID = data.get('sessionId')
+    userID = data.get('userId')
+    topic = data.get('topic')
+
+    if not topic:
+        return jsonify({"error": "Missing topic"}), 400
+
+    try:
+        question_response = gemini_generate(
+            "Generate 5 multiple-choice quiz question about this topic. "
+            "The question must be concise and directly related to the topic. "
+            "Provide exactly four answer choices labeled A, B, C, and D. "
+            "Do not include explanations, just directly return the question and options.",topic)
+        question_text = question_response.get_json()['response']
+
+        correct_answer_response =  gemini_generate(
+            "For the following multiple-choice question, return only the correct answer letter. "
+            "Respond with only a single character: A, B, C, or D. "
+            "Do not include explanations, introductions, or extra text. "
+            "Just return the correct answer letter.")
+        correct_answer = correct_answer_response.get_json()['response']
+
+        quizId = str(uuid.uuid4())
+
+        quiz = {
+            "quizId": quizId,
+            "topic": topic,
+            "questions": [
+                {
+                    "questionText": question_text,
+                    "options": ['A', 'B', 'C', 'D'],
+                    "answers": correct_answer,
+                }
+            ],
+        }
+
+        return jsonify(quiz), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
