@@ -517,81 +517,141 @@ def get_session_details(sessionId):
 
         activities = session_data.get("activities", "")
 
-        prompt = """
-        Analyze this activity log and provide:
-        1. Most used productive application
-        2. Most used distracting application
-        3. Productivity percentage (time spent on productive apps vs total time)
-        Return the results in JSON format with the following structure:
-        {
-            "mostProductiveApp": "app name",
-            "mostDistractingApp": "app name",
-            "productivityPercentage": 75.5
-        }
-        Activity Log: """ + activities
+        active_windows = []
+        for line in activities.split("\n"):
+            if ": " in line:
+                app_name, duration_str = line.split(": ", 1)
+                app_name = app_name.strip()
 
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
+                if not app_name:
+                    continue
 
-        try:
-            analytics = json.loads(response.text)
-        except:
-            analytics = {
-                "mostProductiveApp": "Unknown",
-                "mostDistractingApp": "Unknown",
-                "productivityPercentage": 0
-            }
+                time_parts = duration_str.strip().split(":")
+                if len(time_parts) == 3:
+                    try:
+                        hours = int(time_parts[0])
+                        minutes = int(time_parts[1])
+                        seconds = int(time_parts[2])
+                        total_seconds = hours * 3600 + minutes * 60 + seconds
 
-        return jsonify({
+                        active_windows.append({
+                            "name": app_name,
+                            "duration": duration_str.strip(),
+                            "seconds": total_seconds
+                        })
+                    except:
+                        pass
+
+        active_windows.sort(key=lambda x: x["seconds"], reverse=True)
+
+        if active_windows:
+            app_list = [window['name'] for window in active_windows]
+            app_list_str = ', '.join(app_list)
+
+            prompt = f"""
+            Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+            {app_list_str}
+            
+            Return the classification in a JSON format like this:
+            {{
+                "classifications": [
+                    {{"app": "application name", "category": "PRODUCTIVE"}},
+                    {{"app": "application name", "category": "DISTRACTING"}},
+                    ...
+                ]
+            }}
+            
+            Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
+            Consider games, social media, entertainment, and streaming sites as DISTRACTING.
+            Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
+            """
+
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
+
+            try:
+                classifications = json.loads(response.text)
+
+                focused_time = 0
+                distracted_time = 0
+
+                for window in active_windows:
+                    app_name = window['name']
+                    seconds = window['seconds']
+
+                    category = "NEUTRAL"
+                    for classification in classifications.get('classifications', []):
+                        if classification.get('app') == app_name:
+                            category = classification.get('category')
+                            break
+
+                    window['category'] = category
+
+                    if category == "PRODUCTIVE":
+                        focused_time += seconds
+                    elif category == "DISTRACTING":
+                        distracted_time += seconds
+
+            except Exception as e:
+                print(f"Error parsing Gemini response: {e}")
+                focused_time = sum([w['seconds'] for w in active_windows if any(prod in w['name'].lower() for prod in
+                                                                                ['code', 'doc', 'excel', 'word', 'pdf', 'study', 'learn', 'read', 'write', 'notes'])])
+                distracted_time = sum([w['seconds'] for w in active_windows if any(dist in w['name'].lower() for dist in
+                                                                                   ['game', 'play', 'netflix', 'youtube', 'facebook', 'twitter', 'instagram', 'tiktok'])])
+        else:
+            focused_time = 0
+            distracted_time = 0
+
+        productivity_score = session_data.get("productivityScore", 0)
+        if productivity_score == 0 and activities:
+            prompt = f"""
+            Evaluate the productivity score for this activity log. 
+            Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
+            Consider games, social media, entertainment, and streaming sites as DISTRACTING.
+            Return ONLY a single number between 0 and 10 as the productivity score.
+            
+            Activity Log:
+            {activities}
+            """
+
+            try:
+                model = genai.GenerativeModel("gemini-2.0-flash")
+                response = model.generate_content(prompt)
+                productivity_score = float(response.text.strip())
+            except:
+                if focused_time + distracted_time > 0:
+                    productivity_score = min(
+                        10, max(0, 10 * (focused_time / (focused_time + distracted_time))))
+                else:
+                    productivity_score = 0
+
+        total_seconds = focused_time + distracted_time
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes} minutes"
+
+        created_at = session_data.get("createdAt")
+        date_str = "Unknown date"
+        if created_at:
+            from datetime import datetime
+            if isinstance(created_at, datetime):
+                date_str = created_at.strftime("%Y-%m-%d")
+
+        response_data = {
             "sessionId": sessionId,
             "userId": session_data.get("userId"),
             "groupId": session_data.get("groupId"),
-            "pomodoro": session_data.get("pomodoro"),
+            "pomodoro": session_data.get("pomodoro", False),
             "activities": activities,
-            "analytics": analytics
-        }), 200
+            "date": date_str,
+            "duration": duration,
+            "productivityScore": round(productivity_score, 1),
+            "focusedTime": focused_time,
+            "distractedTime": distracted_time,
+            "activeWindows": active_windows[:10]
+        }
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/group/<groupId>/details', methods=['GET'])
-def get_group_details(groupId):
-    try:
-        group_ref = db.collection('groups').document(groupId)
-        group_data = group_ref.get().to_dict()
-
-        if not group_data:
-            return jsonify({"error": "Group not found"}), 404
-
-        members = group_data.get('members', [])
-        detailed_members = []
-
-        for member in members:
-            userId = member.get('userId')
-            try:
-                user = auth.get_user(userId)
-                detailed_members.append({
-                    "userId": userId,
-                    "displayName": user.display_name,
-                    "email": user.email,
-                    "score": member.get('score', 0)
-                })
-            except:
-                detailed_members.append({
-                    "userId": userId,
-                    "displayName": "Unknown",
-                    "email": "Unknown",
-                    "score": member.get('score', 0)
-                })
-
-        return jsonify({
-            "groupId": groupId,
-            "groupName": group_data.get('groupName'),
-            "createdBy": group_data.get('createdBy'),
-            "createdAt": group_data.get('createdAt'),
-            "members": detailed_members
-        }), 200
+        return jsonify(response_data), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -736,6 +796,411 @@ def get_quiz_history():
             "userId": userId,
             "quizzes": quizzes
         }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/sessions/recent', methods=['GET'])
+def get_recent_sessions():
+    try:
+        userId = request.args.get('userId')
+        limit = request.args.get('limit', default=5, type=int)
+
+        if not userId:
+            return jsonify({"error": "Missing userId parameter"}), 400
+
+        sessions_query = db.collection('sessions')\
+            .where('userId', '==', userId)\
+            .order_by('createdAt', direction=firestore.Query.DESCENDING)\
+            .limit(limit)
+
+        recent_sessions = []
+        for doc in sessions_query.stream():
+            session_data = doc.to_dict()
+            session_data['sessionId'] = doc.id
+
+            if 'createdAt' not in session_data or not session_data['createdAt']:
+                session_data['createdAt'] = firestore.SERVER_TIMESTAMP
+
+            activities = session_data.get("activities", "")
+
+            app_names = []
+            for line in activities.split("\n"):
+                if ": " in line:
+                    app_name, _ = line.split(": ", 1)
+                    app_name = app_name.strip()
+                    if app_name and app_name not in app_names:
+                        app_names.append(app_name)
+
+            productivity_score = session_data.get("productivityScore", 0)
+            if productivity_score == 0 and activities:
+                prompt = f"""
+                Evaluate the productivity score for this activity log.
+                Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
+                Consider games, social media, entertainment, and streaming sites as DISTRACTING.
+                Return ONLY a single number between 0 and 10 as the productivity score.
+                
+                Activity Log:
+                {activities}
+                """
+
+                try:
+                    model = genai.GenerativeModel("gemini-2.0-flash")
+                    response = model.generate_content(prompt)
+                    productivity_score = float(response.text.strip())
+
+                    db.collection('sessions').document(doc.id).update({
+                        'productivityScore': productivity_score
+                    })
+                except Exception as e:
+                    print(f"Error calculating productivity score: {e}")
+                    productivity_score = 5
+
+            total_seconds = 0
+            focused_time = 0
+            distracted_time = 0
+
+            for line in activities.split("\n"):
+                if ": " in line:
+                    app_name, duration_str = line.split(": ", 1)
+                    app_name = app_name.strip()
+
+                    if not app_name:
+                        continue
+
+                    time_parts = duration_str.strip().split(":")
+                    if len(time_parts) == 3:
+                        try:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = int(time_parts[2])
+                            total_seconds += hours * 3600 + minutes * 60 + seconds
+                        except:
+                            pass
+
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes} minutes"
+
+            created_at = session_data.get("createdAt")
+            date_str = "Unknown date"
+            if created_at:
+                from datetime import datetime
+                if isinstance(created_at, datetime):
+                    date_str = created_at.strftime("%Y-%m-%d")
+
+            simplified_session = {
+                "sessionId": doc.id,
+                "date": date_str,
+                "duration": duration,
+                "productivityScore": round(productivity_score, 1),
+                "appCount": len(app_names),
+                "topApps": app_names[:3]
+            }
+
+            recent_sessions.append(simplified_session)
+
+        return jsonify({
+            "userId": userId,
+            "recentSessions": recent_sessions
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/session/<sessionId>/activity-data', methods=['GET'])
+def get_session_activity_data(sessionId):
+    try:
+        session_ref = db.collection('sessions').document(sessionId)
+        session_data = session_ref.get().to_dict()
+
+        if not session_data:
+            return jsonify({"error": "Session not found"}), 404
+
+        activities = session_data.get("activities", "")
+
+        activity_data = []
+        app_totals = {}
+
+        for line in activities.split("\n"):
+            if ": " in line:
+                app_name, duration_str = line.split(": ", 1)
+                app_name = app_name.strip()
+
+                if not app_name:
+                    continue
+
+                time_parts = duration_str.strip().split(":")
+                if len(time_parts) == 3:
+                    try:
+                        hours = int(time_parts[0])
+                        minutes = int(time_parts[1])
+                        seconds = int(time_parts[2])
+                        total_seconds = hours * 3600 + minutes * 60 + seconds
+
+                        if app_name in app_totals:
+                            app_totals[app_name] += total_seconds
+                        else:
+                            app_totals[app_name] = total_seconds
+                    except:
+                        pass
+
+        for app, seconds in app_totals.items():
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            remaining_seconds = seconds % 60
+
+            activity_data.append({
+                "name": app,
+                "seconds": seconds,
+                "formattedTime": f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
+            })
+
+        activity_data.sort(key=lambda x: x["seconds"], reverse=True)
+
+        if activity_data:
+            app_list = [item['name'] for item in activity_data]
+            app_list_str = ', '.join(app_list)
+
+            prompt = f"""
+            Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+            {app_list_str}
+            
+            Return the classification in a JSON format like this:
+            {{
+                "classifications": [
+                    {{"app": "application name", "category": "PRODUCTIVE"}},
+                    {{"app": "application name", "category": "DISTRACTING"}},
+                    ...
+                ]
+            }}
+            
+            Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
+            Consider games, social media, entertainment, and streaming sites as DISTRACTING.
+            Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
+            """
+
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
+
+            try:
+                classifications = json.loads(response.text)
+
+                for item in activity_data:
+                    app_name = item['name']
+
+                    category = "NEUTRAL"
+                    for classification in classifications.get('classifications', []):
+                        if classification.get('app') == app_name:
+                            category = classification.get('category')
+                            break
+
+                    item['category'] = category
+            except Exception as e:
+                print(f"Error parsing Gemini response: {e}")
+                for item in activity_data:
+                    item['category'] = "NEUTRAL"
+
+        total_time = sum(item['seconds'] for item in activity_data)
+        productive_time = sum(item['seconds'] for item in activity_data if item.get(
+            'category') == 'PRODUCTIVE')
+        distracting_time = sum(item['seconds'] for item in activity_data if item.get(
+            'category') == 'DISTRACTING')
+
+        def format_time(seconds):
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            return f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+
+        summary = {
+            "totalTime": format_time(total_time),
+            "totalSeconds": total_time,
+            "productiveTime": format_time(productive_time),
+            "productiveSeconds": productive_time,
+            "distractingTime": format_time(distracting_time),
+            "distractingSeconds": distracting_time,
+            "productivityRatio": round(productive_time / max(1, total_time) * 100, 1)
+        }
+
+        return jsonify({
+            "sessionId": sessionId,
+            "activityData": activity_data,
+            "summary": summary
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/dashboard/<userId>', methods=['GET'])
+def get_dashboard_data(userId):
+    try:
+        try:
+            user = auth.get_user(userId)
+        except:
+            return jsonify({"error": "User not found"}), 404
+
+        recent_sessions_query = db.collection('sessions')\
+            .where('userId', '==', userId)\
+            .order_by('createdAt', direction=firestore.Query.DESCENDING)\
+            .limit(5)
+
+        recent_sessions = []
+        for doc in recent_sessions_query.stream():
+            session_data = doc.to_dict()
+            session_data['sessionId'] = doc.id
+
+            created_at = session_data.get("createdAt")
+            date_str = "Unknown date"
+            if created_at:
+                from datetime import datetime
+                if isinstance(created_at, datetime):
+                    date_str = created_at.strftime("%Y-%m-%d")
+
+            productivity_score = session_data.get("productivityScore", 0)
+
+            activities = session_data.get("activities", "")
+            total_seconds = 0
+            for line in activities.split("\n"):
+                if ": " in line:
+                    _, duration_str = line.split(": ", 1)
+                    time_parts = duration_str.strip().split(":")
+                    if len(time_parts) == 3:
+                        try:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = int(time_parts[2])
+                            total_seconds += hours * 3600 + minutes * 60 + seconds
+                        except:
+                            pass
+
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+
+            session_summary = {
+                "sessionId": doc.id,
+                "date": date_str,
+                "duration": duration,
+                "productivityScore": round(productivity_score, 1)
+            }
+
+            recent_sessions.append(session_summary)
+
+        all_sessions_query = db.collection('sessions').where(
+            'userId', '==', userId).stream()
+
+        total_sessions = 0
+        total_time_seconds = 0
+        total_productive_seconds = 0
+        total_distracting_seconds = 0
+        productivity_scores = []
+
+        for doc in all_sessions_query:
+            session_data = doc.to_dict()
+            total_sessions += 1
+
+            productivity_score = session_data.get("productivityScore", 0)
+            if productivity_score > 0:
+                productivity_scores.append(productivity_score)
+
+            activities = session_data.get("activities", "")
+
+            app_names = []
+            app_durations = {}
+
+            for line in activities.split("\n"):
+                if ": " in line:
+                    app_name, duration_str = line.split(": ", 1)
+                    app_name = app_name.strip()
+
+                    if not app_name:
+                        continue
+
+                    if app_name not in app_names:
+                        app_names.append(app_name)
+
+                    time_parts = duration_str.strip().split(":")
+                    if len(time_parts) == 3:
+                        try:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = int(time_parts[2])
+                            app_seconds = hours * 3600 + minutes * 60 + seconds
+
+                            total_time_seconds += app_seconds
+
+                            app_durations[app_name] = app_seconds
+                        except:
+                            pass
+
+            if app_names:
+                app_list_str = ', '.join(app_names)
+
+                prompt = f"""
+                Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+                {app_list_str}
+                
+                Return the classification in a JSON format like this:
+                {{
+                    "classifications": [
+                        {{"app": "application name", "category": "PRODUCTIVE"}},
+                        {{"app": "application name", "category": "DISTRACTING"}},
+                        ...
+                    ]
+                }}
+                
+                Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
+                Consider games, social media, entertainment, and streaming sites as DISTRACTING.
+                Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
+                """
+
+                model = genai.GenerativeModel("gemini-2.0-flash")
+                response = model.generate_content(prompt)
+
+                try:
+                    classifications = json.loads(response.text)
+
+                    for app_name, seconds in app_durations.items():
+                        category = "NEUTRAL"
+                        for classification in classifications.get('classifications', []):
+                            if classification.get('app') == app_name:
+                                category = classification.get('category')
+                                break
+
+                        if category == "PRODUCTIVE":
+                            total_productive_seconds += seconds
+                        elif category == "DISTRACTING":
+                            total_distracting_seconds += seconds
+
+                except Exception as e:
+                    print(f"Error parsing Gemini response: {e}")
+
+        avg_productivity = sum(productivity_scores) / \
+            max(1, len(productivity_scores))
+
+        def format_time(seconds):
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            return f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+
+        dashboard_data = {
+            "userId": userId,
+            "displayName": user.display_name,
+            "totalSessions": total_sessions,
+            "totalTime": format_time(total_time_seconds),
+            "totalTimeSeconds": total_time_seconds,
+            "productiveTime": format_time(total_productive_seconds),
+            "productiveTimeSeconds": total_productive_seconds,
+            "distractingTime": format_time(total_distracting_seconds),
+            "distractingTimeSeconds": total_distracting_seconds,
+            "averageProductivityScore": round(avg_productivity, 1),
+            "recentSessions": recent_sessions
+        }
+
+        return jsonify(dashboard_data), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
