@@ -1,3 +1,4 @@
+import app_tracker
 import os
 import json
 import time
@@ -41,9 +42,11 @@ genai.configure(api_key=GOOGLE_GEMINI_KEY)
 app = Flask(__name__)
 CORS(app)
 
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"message": "Welcome to LockedIn API"})
+
 
 @app.route("/generate", methods=["POST"])
 def generate_text():
@@ -61,7 +64,6 @@ def generate_text():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 
 @app.route('/login', methods=['POST'])
@@ -84,8 +86,8 @@ def login():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
-    
+
+
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
@@ -102,7 +104,7 @@ def register():
             email=email,
             password=password,
         )
-        
+
         return jsonify({
             "message": "User registered successfully",
             "userId": user.uid
@@ -110,11 +112,10 @@ def register():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
 
 
-import app_tracker
 tracker = app_tracker.ApplicationTracker()
+
 
 def log_activity(sessionId):
     session_ref = db.collection('sessions').document(sessionId)
@@ -128,10 +129,12 @@ def log_activity(sessionId):
         'activities': activities,
     })
 
+
 def stop_tracking(duration, sessionId):
     time.sleep(duration * 60)
     tracker.stop_tracking()
     log_activity(sessionId)
+
 
 @app.route('/session/start', methods=['POST'])
 def startSession():
@@ -140,7 +143,7 @@ def startSession():
     userId = data.get('userId')
     pomodoro = data.get('pomodoro')
     duration = int(data.get('duration'))
-    
+
     try:
         session_data = {
             'groupId': groupId,
@@ -151,10 +154,11 @@ def startSession():
 
         session_ref = db.collection('sessions').document()
         session_ref.set(session_data)
-        
+
         tracker.start_tracking()
 
-        threading.Thread(target=stop_tracking, args=(duration,session_ref.id)).start()
+        threading.Thread(target=stop_tracking, args=(
+            duration, session_ref.id)).start()
 
         return jsonify({
             "message": "Session started",
@@ -162,14 +166,14 @@ def startSession():
         }), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500    
-    
-    
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/session/end', methods=['POST'])
 def endSession():
     data = request.json
     sessionId = data.get('sessionId')
-    
+
     try:
         log_activity(sessionId)
 
@@ -186,8 +190,8 @@ def endSession():
             All other activities are considered neutral.
             Provide a productivity score as a float between 0.0 and 10.0, where 10.0 indicates maximum productivity. 
             OUTPUT ONLY A FLOAT FROM 0.0 TO 10.0.
-            Activity Log: """ + session_data.get("activities")      
-        
+            Activity Log: """ + session_data.get("activities")
+
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
 
@@ -195,7 +199,7 @@ def endSession():
 
         userId = session_data.get("userId")
         groupId = session_data.get("groupId")
-        
+
         group_ref = db.collection('groups').document(groupId)
         group_data = group_ref.get().to_dict()
 
@@ -205,7 +209,7 @@ def endSession():
             if member.get('userId') == userId:
                 member['score'] = productivityScore
                 break
-        
+
         group_ref.update({'members': members})
 
         return jsonify({
@@ -215,22 +219,21 @@ def endSession():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
-    
+
 
 @app.route('/activity/update', methods=['POST'])
 def updateActivity():
     data = request.json
     sessionId = data.get('sessionId')
 
-    try: 
+    try:
         log_activity(sessionId)
 
         return jsonify({'message': 'Activity logged'}), 200
-    
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 
 @app.route('/activity/<sessionId>', methods=['GET'])
 def getActivity(sessionId):
@@ -244,10 +247,10 @@ def getActivity(sessionId):
             "userId": session_data.get("userId"),
             "userActivities": session_data.get("activities"),
         }), 200
-    
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 
 @app.route('/leaderboard/<groupId>', methods=['GET'])
 def getLeaderboard(groupId):
@@ -257,17 +260,38 @@ def getLeaderboard(groupId):
 
         members = group_data.get('members')
 
-        sorted_members = sorted(members, key=lambda x: x.get('score', 0), reverse=True)
+        sorted_members = sorted(
+            members, key=lambda x: x.get('score', 0), reverse=True)
 
         return jsonify({
             "leaderboard": sorted_members,
         }), 200
-    
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 
 # "GROUP MANAGEMENT"
+
+@app.route('/groups', methods=['GET'])
+def get_all_groups():
+    try:
+        groups = []
+        groups_query = db.collection('groups').stream()
+
+        for group_doc in groups_query:
+            group_data = group_doc.to_dict()
+            group_data['groupCode'] = group_doc.id
+            groups.append(group_data)
+
+        return jsonify({
+            "groups": groups
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/groups/create', methods=['POST'])
 def create():
     data = request.json
@@ -276,17 +300,17 @@ def create():
 
     if not groupName:
         return jsonify({"error": "Missing groupName"}), 400
-        
+
     if not userID:
         return jsonify({"error": "Missing userID"}), 400
-    
+
     try:
         user = auth.get_user(userID)
-        group_ref = db.collection('groups').document()  
+        group_ref = db.collection('groups').document()
         group_ref.set({
             'groupName': groupName,
-            'createdBy': userID,  
-            'members': [{"userId": userID, "score": 0}],  
+            'createdBy': userID,
+            'members': [{"userId": userID, "score": 0}],
             'createdAt': firestore.SERVER_TIMESTAMP
         })
 
@@ -297,7 +321,8 @@ def create():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
+
 @app.route('/groups/join', methods=['POST'])
 def join():
     data = request.json
@@ -306,10 +331,10 @@ def join():
 
     if not groupCode:
         return jsonify({"error": "Missing groupCode"}), 400
-    
+
     if not userID:
         return jsonify({"error": "Missing userID"}), 400
-    
+
     try:
         user = auth.get_user(userID)
         group_ref = db.collection('groups').document(groupCode)
@@ -317,32 +342,34 @@ def join():
 
         if not group_doc.exists:
             return jsonify({"error": "Group not found"}), 404
-        
+
         group_data = group_doc.to_dict()
         members = group_data.get('members')
 
         if userID in members:
             return jsonify({"error": "User already in group"}), 400
-        
+
         members.append({'userId': userID, 'score': 0})
         group_ref.update({
             'members': members
-        })  
+        })
 
         return jsonify({
             "message": "User joined group",
             "groupCode": groupCode,
             "members": members
         }), 200
-    
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
+
 @app.route('/groups/<groupName>/members', methods=['GET'])
 def get_group(groupName):
     try:
         # Query Firestore for groups with the given groupName
-        group_query = db.collection('groups').where('groupName', '==', groupName).stream()
+        group_query = db.collection('groups').where(
+            'groupName', '==', groupName).stream()
 
         group_data = None
         for group_doc in group_query:
@@ -354,7 +381,6 @@ def get_group(groupName):
 
         return jsonify(group_data), 200
 
-    
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -367,6 +393,7 @@ def gemini_generate(prompt, topic = "" ):
         "response": response.text
     })
 
+<<<<<<< HEAD
 @app.route('/quiz/generate', methods=['POST'])
 def generate_quiz():
     data = request.json
@@ -410,6 +437,8 @@ def generate_quiz():
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+=======
+>>>>>>> a95ece68534135d8814bb29b6fe7b78527fe6dbc
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
