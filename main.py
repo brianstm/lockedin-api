@@ -176,12 +176,20 @@ def endSession():
         session_ref = db.collection('sessions').document(sessionId)
         session_data = session_ref.get().to_dict()
 
-        prompt = "Evaluate how many productivity score for my Computer Science study of this activities, ONLY OUTPUT A FLOAT FROM 0 to 10.0 " + session_data.get("activities")      
+        prompt = """
+            OUTPUT ONLY A FLOAT FROM 0.0 TO 10.0.
+            Evaluate the productivity score for a Computer Science student based on the following activity log. Use a grading scheme considering duration of activity where:
+            Academic-related activities (including YouTube tutorials) are considered positive.
+            Gaming, social media, and non-academic activities are considered negative.
+            All other activities are considered neutral.
+            Provide a productivity score as a float between 0.0 and 10.0, where 10.0 indicates maximum productivity. 
+            OUTPUT ONLY A FLOAT FROM 0.0 TO 10.0.
+            Activity Log: """ + session_data.get("activities")      
         
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
 
-        productivityScore = response.text
+        productivityScore = float(response.text)
 
         userId = session_data.get("userId")
         groupId = session_data.get("groupId")
@@ -240,7 +248,7 @@ def getActivity(sessionId):
     
 
 @app.route('/leaderboard/<groupId>', methods=['GET'])
-def getActivity(sessionId):
+def getLeaderboard(groupId):
     try:
         group_ref = db.collection('groups').document(groupId)
         group_data = group_ref.get().to_dict()
@@ -257,9 +265,7 @@ def getActivity(sessionId):
         return jsonify({'error': str(e)}), 500
     
 
-
-
-"GROUP MANAGEMENT"
+# "GROUP MANAGEMENT"
 @app.route('/groups/create', methods=['POST'])
 def create():
     data = request.json
@@ -278,7 +284,7 @@ def create():
         group_ref.set({
             'groupName': groupName,
             'createdBy': userID,  
-            'members': [userID],  
+            'members': [{"userId": userID, "score": 0}],  
             'createdAt': firestore.SERVER_TIMESTAMP
         })
 
@@ -316,7 +322,7 @@ def join():
         if userID in members:
             return jsonify({"error": "User already in group"}), 400
         
-        members.append(userID) 
+        members.append({'userId': userID, 'score': 0})
         group_ref.update({
             'members': members
         })  
@@ -352,8 +358,3 @@ def get_group(groupName):
     
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
-
-
-    
-
-
