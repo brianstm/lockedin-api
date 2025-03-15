@@ -837,78 +837,109 @@ def get_recent_sessions():
         if not userId:
             return jsonify({"error": "Missing userId parameter"}), 400
 
+        # First, let's check how many sessions exist for this user without ordering
+        all_sessions_query = db.collection('sessions').where('userId', '==', userId).stream()
+        all_sessions_count = 0
+        for _ in all_sessions_query:
+            all_sessions_count += 1
+            
+        print(f"Found {all_sessions_count} total sessions for user {userId}")
+        
+        # Now try to get the sessions with ordering
         sessions_query = db.collection('sessions')\
             .where('userId', '==', userId)\
-            .order_by('createdAt', direction=firestore.Query.DESCENDING)\
             .limit(limit)
+            
+        # Remove the order_by for now to see if that's causing issues
+        # .order_by('createdAt', direction=firestore.Query.DESCENDING)\
 
         recent_sessions = []
         for doc in sessions_query.stream():
             session_data = doc.to_dict()
-            session_data['sessionId'] = doc.id
+            session_id = doc.id
+            session_data['sessionId'] = session_id
+            
+            print(f"Processing session {session_id}")
+            print(f"Session data keys: {session_data.keys()}")
 
-            if 'createdAt' not in session_data or not session_data['createdAt']:
-                session_data['createdAt'] = firestore.SERVER_TIMESTAMP
+            # Check if createdAt exists and what type it is
+            created_at = session_data.get("createdAt")
+            if created_at:
+                print(f"createdAt exists with type: {type(created_at)}")
+            else:
+                print(f"createdAt does not exist for session {session_id}")
+                # Add a timestamp if it doesn't exist
+                db.collection('sessions').document(session_id).update({
+                    'createdAt': firestore.SERVER_TIMESTAMP
+                })
 
             activities = session_data.get("activities", "")
+            if activities:
+                print(f"Session {session_id} has activities of length: {len(activities)}")
+            else:
+                print(f"Session {session_id} has no activities")
 
             app_names = []
+            total_seconds = 0
+            
+            # Improved parsing logic for activity data
             for line in activities.split("\n"):
-                if ": " in line:
-                    app_name, _ = line.split(": ", 1)
-                    app_name = app_name.strip()
-                    if app_name and app_name not in app_names:
-                        app_names.append(app_name)
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Find the last occurrence of ": " which precedes the time
+                last_colon_index = line.rfind(": ")
+                if last_colon_index == -1:
+                    continue
+                    
+                app_name = line[:last_colon_index].strip()
+                duration_str = line[last_colon_index + 2:].strip()
+                
+                if not app_name or not duration_str:
+                    continue
+                    
+                if app_name and app_name not in app_names:
+                    app_names.append(app_name)
+
+                time_parts = duration_str.split(":")
+                if len(time_parts) == 3:
+                    try:
+                        hours = int(time_parts[0])
+                        minutes = int(time_parts[1])
+                        seconds = int(time_parts[2])
+                        total_seconds += hours * 3600 + minutes * 60 + seconds
+                    except:
+                        pass
 
             productivity_score = session_data.get("productivityScore", 0)
             if productivity_score == 0 and activities:
-                prompt = f"""
-                Evaluate the productivity score for this activity log.
-                Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
-                Consider games, social media, entertainment, and streaming sites as DISTRACTING.
-                Return ONLY a single number between 0 and 10 as the productivity score.
-                
-                Activity Log:
-                {activities}
-                """
-
+                print(f"Calculating productivity score for session {session_id}")
                 try:
-                    model = genai.GenerativeModel("gemini-2.0-flash")
-                    response = model.generate_content(prompt)
-                    productivity_score = float(response.text.strip())
-
-                    db.collection('sessions').document(doc.id).update({
+                    # Use our cached classification system instead of Gemini
+                    app_names_for_score = [app for app in app_names]
+                    classifications_response = classify_apps_cached_internal(app_names_for_score)
+                    classifications = classifications_response.get('classifications', [])
+                    
+                    productive_count = sum(1 for c in classifications if c.get('category') == 'PRODUCTIVE')
+                    distracting_count = sum(1 for c in classifications if c.get('category') == 'DISTRACTING')
+                    
+                    if app_names:
+                        productivity_score = 10 * (productive_count / len(app_names))
+                    else:
+                        productivity_score = 5
+                        
+                    db.collection('sessions').document(session_id).update({
                         'productivityScore': productivity_score
                     })
+                    print(f"Updated productivity score to {productivity_score}")
                 except Exception as e:
                     print(f"Error calculating productivity score: {e}")
                     productivity_score = 5
 
-            total_seconds = 0
-            focused_time = 0
-            distracted_time = 0
-
-            for line in activities.split("\n"):
-                if ": " in line:
-                    app_name, duration_str = line.split(": ", 1)
-                    app_name = app_name.strip()
-
-                    if not app_name:
-                        continue
-
-                    time_parts = duration_str.strip().split(":")
-                    if len(time_parts) == 3:
-                        try:
-                            hours = int(time_parts[0])
-                            minutes = int(time_parts[1])
-                            seconds = int(time_parts[2])
-                            total_seconds += hours * 3600 + minutes * 60 + seconds
-                        except:
-                            pass
-
             hours = total_seconds // 3600
             minutes = (total_seconds % 3600) // 60
-            duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes} minutes"
+            duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
             created_at = session_data.get("createdAt")
             date_str = "Unknown date"
@@ -916,24 +947,29 @@ def get_recent_sessions():
                 from datetime import datetime
                 if isinstance(created_at, datetime):
                     date_str = created_at.strftime("%Y-%m-%d")
+                else:
+                    print(f"createdAt is not a datetime object: {created_at}")
 
             simplified_session = {
-                "sessionId": doc.id,
+                "sessionId": session_id,
                 "date": date_str,
                 "duration": duration,
                 "productivityScore": round(productivity_score, 1),
                 "appCount": len(app_names),
-                "topApps": app_names[:3]
+                "topApps": app_names[:3] if app_names else []
             }
 
             recent_sessions.append(simplified_session)
+            print(f"Added session {session_id} to recent_sessions")
 
         return jsonify({
             "userId": userId,
-            "recentSessions": recent_sessions
+            "recentSessions": recent_sessions,
+            "totalSessionsCount": all_sessions_count
         }), 200
 
     except Exception as e:
+        print(f"Error in get_recent_sessions: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -952,27 +988,34 @@ def get_session_activity_data(sessionId):
         app_totals = {}
 
         for line in activities.split("\n"):
-            if ": " in line:
-                app_name, duration_str = line.split(": ", 1)
-                app_name = app_name.strip()
+            line = line.strip()
+            if not line:
+                continue
+                
+            last_colon_index = line.rfind(": ")
+            if last_colon_index == -1:
+                continue
+                
+            app_name = line[:last_colon_index].strip()
+            duration_str = line[last_colon_index + 2:].strip()
+            
+            if not app_name or not duration_str:
+                continue
 
-                if not app_name:
-                    continue
+            time_parts = duration_str.split(":")
+            if len(time_parts) == 3:
+                try:
+                    hours = int(time_parts[0])
+                    minutes = int(time_parts[1])
+                    seconds = int(time_parts[2])
+                    total_seconds = hours * 3600 + minutes * 60 + seconds
 
-                time_parts = duration_str.strip().split(":")
-                if len(time_parts) == 3:
-                    try:
-                        hours = int(time_parts[0])
-                        minutes = int(time_parts[1])
-                        seconds = int(time_parts[2])
-                        total_seconds = hours * 3600 + minutes * 60 + seconds
-
-                        if app_name in app_totals:
-                            app_totals[app_name] += total_seconds
-                        else:
-                            app_totals[app_name] = total_seconds
-                    except:
-                        pass
+                    if app_name in app_totals:
+                        app_totals[app_name] += total_seconds
+                    else:
+                        app_totals[app_name] = total_seconds
+                except:
+                    pass
 
         for app, seconds in app_totals.items():
             hours = seconds // 3600
@@ -988,45 +1031,25 @@ def get_session_activity_data(sessionId):
         activity_data.sort(key=lambda x: x["seconds"], reverse=True)
 
         if activity_data:
-            app_list = [item['name'] for item in activity_data]
-            app_list_str = ', '.join(app_list)
-
-            prompt = f"""
-            Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
-            {app_list_str}
+            app_names = [item['name'] for item in activity_data]
             
-            Return the classification in a JSON format like this:
-            {{
-                "classifications": [
-                    {{"app": "application name", "category": "PRODUCTIVE"}},
-                    {{"app": "application name", "category": "DISTRACTING"}},
-                    ...
-                ]
-            }}
-            
-            Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
-            Consider games, social media, entertainment, and streaming sites as DISTRACTING.
-            Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
-            """
-
-            model = genai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content(prompt)
-
             try:
-                classifications = json.loads(response.text)
-
+                classifications_response = classify_apps_cached_internal(app_names)
+                classifications = classifications_response.get('classifications', [])
+                
                 for item in activity_data:
                     app_name = item['name']
-
+                    
                     category = "NEUTRAL"
-                    for classification in classifications.get('classifications', []):
+                    for classification in classifications:
                         if classification.get('app') == app_name:
                             category = classification.get('category')
                             break
-
+                            
                     item['category'] = category
+                    
             except Exception as e:
-                print(f"Error parsing Gemini response: {e}")
+                print(f"Error classifying apps: {e}")
                 for item in activity_data:
                     item['category'] = "NEUTRAL"
 
@@ -1060,6 +1083,114 @@ def get_session_activity_data(sessionId):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def classify_apps_cached_internal(app_names):
+    if not app_names:
+        return {"classifications": []}
+    
+    uncached_apps = [app for app in app_names if app not in app_classification_cache]
+    
+    if uncached_apps:
+        app_list_str = ', '.join(uncached_apps)
+        
+        prompt = f"""
+        You are a productivity classifier for applications.
+        
+        Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+        {app_list_str}
+        
+        Return ONLY a valid JSON object with this exact structure:
+        {{
+            "classifications": [
+                {{"app": "application name", "category": "PRODUCTIVE"}},
+                {{"app": "application name", "category": "DISTRACTING"}},
+                ...
+            ]
+        }}
+        
+        Rules for classification:
+        - Coding environments (VS Code, IntelliJ, etc.) are PRODUCTIVE
+        - Educational websites and apps are PRODUCTIVE
+        - Document editors (Word, Excel, Google Docs) are PRODUCTIVE
+        - Productivity tools (Notion, Evernote) are PRODUCTIVE
+        - Communication tools for work (Slack, Teams) are PRODUCTIVE
+        - Games are DISTRACTING
+        - Social media (Facebook, Twitter, Instagram) are DISTRACTING
+        - Entertainment (Netflix, YouTube) are DISTRACTING
+        - Messaging apps (WhatsApp, Telegram) are DISTRACTING
+        
+        Do not include any explanations, just return the JSON.
+        """
+        
+        try:
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
+            
+            print(f"Gemini raw response (cached): {response.text}")
+            
+            json_text = response.text
+            if "```json" in json_text:
+                json_text = json_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_text:
+                json_text = json_text.split("```")[1].split("```")[0].strip()
+                
+            classifications = json.loads(json_text)
+            
+            if "classifications" not in classifications:
+                raise ValueError("Response missing 'classifications' key")
+            
+            cache_updated = False
+            for classification in classifications.get('classifications', []):
+                app = classification.get('app')
+                category = classification.get('category')
+                if app and category:
+                    app_classification_cache[app] = category
+                    cache_updated = True
+            
+            classified_apps = [c.get("app") for c in classifications.get("classifications", [])]
+            missing_apps = [app for app in uncached_apps if app not in classified_apps]
+            
+            if missing_apps:
+                for app in missing_apps:
+                    app_lower = app.lower()
+                    
+                    if any(keyword in app_lower for keyword in ["code", "visual studio", "intellij", "word", "excel", "docs", "notion", "slack", "teams"]):
+                        category = "PRODUCTIVE"
+                    elif any(keyword in app_lower for keyword in ["game", "facebook", "twitter", "instagram", "netflix", "youtube", "telegram", "whatsapp"]):
+                        category = "DISTRACTING"
+                    else:
+                        category = "NEUTRAL"
+                    
+                    app_classification_cache[app] = category
+                    cache_updated = True
+            
+            if cache_updated:
+                save_app_classifications()
+                
+        except Exception as e:
+            print(f"Error using Gemini API for classification: {e}")
+            for app in uncached_apps:
+                app_lower = app.lower()
+                
+                if any(keyword in app_lower for keyword in ["code", "visual studio", "intellij", "word", "excel", "docs", "notion", "slack", "teams"]):
+                    category = "PRODUCTIVE"
+                elif any(keyword in app_lower for keyword in ["game", "facebook", "twitter", "instagram", "netflix", "youtube", "telegram", "whatsapp"]):
+                    category = "DISTRACTING"
+                else:
+                    category = "NEUTRAL"
+                
+                app_classification_cache[app] = category
+            save_app_classifications()
+    
+    result = {"classifications": []}
+    for app in app_names:
+        category = app_classification_cache.get(app, "NEUTRAL")
+        result["classifications"].append({
+            "app": app,
+            "category": category
+        })
+    
+    return result
+
 
 @app.route('/classify-apps', methods=['POST'])
 def classify_apps():
@@ -1076,10 +1207,12 @@ def classify_apps():
         app_list_str = ', '.join(app_names)
         
         prompt = f"""
+        You are a productivity classifier for applications.
+        
         Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
         {app_list_str}
         
-        Return the classification in a JSON format like this:
+        Return ONLY a valid JSON object with this exact structure:
         {{
             "classifications": [
                 {{"app": "application name", "category": "PRODUCTIVE"}},
@@ -1088,57 +1221,63 @@ def classify_apps():
             ]
         }}
         
-        Consider coding environments, educational websites, document editors, productivity tools, 
-        and learning platforms as PRODUCTIVE.
+        Rules for classification:
+        - Coding environments (VS Code, IntelliJ, etc.) are PRODUCTIVE
+        - Educational websites and apps are PRODUCTIVE
+        - Document editors (Word, Excel, Google Docs) are PRODUCTIVE
+        - Productivity tools (Notion, Evernote) are PRODUCTIVE
+        - Communication tools for work (Slack, Teams) are PRODUCTIVE
+        - Games are DISTRACTING
+        - Social media (Facebook, Twitter, Instagram) are DISTRACTING
+        - Entertainment (Netflix, YouTube) are DISTRACTING
+        - Messaging apps (WhatsApp, Telegram) are DISTRACTING
         
-        Consider games, social media, entertainment, streaming sites, and non-educational video 
-        platforms as DISTRACTING.
-        
-        Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
+        Do not include any explanations, just return the JSON.
         """
         
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
         
+        print(f"Gemini raw response: {response.text}")
+        
         try:
-            classifications = json.loads(response.text)
+            json_text = response.text
+            if "```json" in json_text:
+                json_text = json_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_text:
+                json_text = json_text.split("```")[1].split("```")[0].strip()
+                
+            classifications = json.loads(json_text)
+            
+            if "classifications" not in classifications:
+                raise ValueError("Response missing 'classifications' key")
+                
+            classified_apps = [c.get("app") for c in classifications.get("classifications", [])]
+            missing_apps = [app for app in app_names if app not in classified_apps]
+            
+            if missing_apps:
+                for app in missing_apps:
+                    classifications["classifications"].append({
+                        "app": app,
+                        "category": "NEUTRAL"
+                    })
+                    
             return jsonify(classifications), 200
-        except json.JSONDecodeError:
-            # Fallback classification if Gemini doesn't return valid JSON
+            
+        except Exception as e:
+            print(f"Error parsing Gemini response: {e}")
+            print(f"Raw response: {response.text}")
+            
             fallback_classifications = {"classifications": []}
-            
-            productive_keywords = [
-                "code", "visual studio", "intellij", "pycharm", "webstorm", "eclipse", 
-                "xcode", "android studio", "sublime", "atom", "notepad", "textedit",
-                "word", "excel", "powerpoint", "docs", "sheets", "slides", 
-                "notion", "evernote", "onenote", "google drive", "dropbox", "onedrive",
-                "slack", "teams", "zoom", "meet", "webex", "discord",
-                "github", "gitlab", "bitbucket", "stackoverflow", "canvas", "blackboard",
-                "moodle", "coursera", "udemy", "edx", "khan academy", "duolingo",
-                "terminal", "command prompt", "powershell", "bash", "zsh", "cmd",
-                "calculator", "calendar", "mail", "outlook", "gmail", "pdf"
-            ]
-            
-            distracting_keywords = [
-                "game", "steam", "epic games", "origin", "battle.net", "uplay",
-                "facebook", "twitter", "instagram", "tiktok", "snapchat", "reddit",
-                "youtube", "twitch", "netflix", "hulu", "disney+", "amazon prime",
-                "spotify", "apple music", "tidal", "pandora", "soundcloud",
-                "messaging", "whatsapp", "telegram", "signal", "wechat", "line"
-            ]
             
             for app in app_names:
                 app_lower = app.lower()
                 
-                is_productive = any(keyword in app_lower for keyword in productive_keywords)
-                is_distracting = any(keyword in app_lower for keyword in distracting_keywords)
-                
-                if is_productive and not is_distracting:
+                if any(keyword in app_lower for keyword in ["code", "visual studio", "intellij", "word", "excel", "docs", "notion", "slack", "teams"]):
                     category = "PRODUCTIVE"
-                elif is_distracting and not is_productive:
+                elif any(keyword in app_lower for keyword in ["game", "facebook", "twitter", "instagram", "netflix", "youtube", "telegram", "whatsapp"]):
                     category = "DISTRACTING"
                 else:
-                    # If ambiguous or neither, default to NEUTRAL
                     category = "NEUTRAL"
                 
                 fallback_classifications["classifications"].append({
@@ -1149,6 +1288,7 @@ def classify_apps():
             return jsonify(fallback_classifications), 200
             
     except Exception as e:
+        print(f"Error in classify_apps: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1164,57 +1304,97 @@ def classify_apps_local():
         if len(app_names) == 0:
             return jsonify({"classifications": []}), 200
         
-        productive_keywords = [
-            "code", "visual studio", "intellij", "pycharm", "webstorm", "eclipse", 
-            "xcode", "android studio", "sublime", "atom", "notepad", "textedit",
-            "word", "excel", "powerpoint", "docs", "sheets", "slides", 
-            "notion", "evernote", "onenote", "google drive", "dropbox", "onedrive",
-            "slack", "teams", "zoom", "meet", "webex", "discord",
-            "github", "gitlab", "bitbucket", "stackoverflow", "canvas", "blackboard",
-            "moodle", "coursera", "udemy", "edx", "khan academy", "duolingo",
-            "terminal", "command prompt", "powershell", "bash", "zsh", "cmd",
-            "calculator", "calendar", "mail", "outlook", "gmail", "pdf",
-            "chrome - canvas", "chrome - github", "chrome - gitlab", "chrome - stackoverflow",
-            "chrome - docs", "chrome - sheets", "chrome - slides", "chrome - drive",
-            "firefox - canvas", "firefox - github", "firefox - gitlab", "firefox - stackoverflow",
-            "firefox - docs", "firefox - sheets", "firefox - slides", "firefox - drive"
-        ]
+        app_list_str = ', '.join(app_names)
         
-        distracting_keywords = [
-            "game", "steam", "epic games", "origin", "battle.net", "uplay",
-            "facebook", "twitter", "instagram", "tiktok", "snapchat", "reddit",
-            "youtube", "twitch", "netflix", "hulu", "disney+", "amazon prime",
-            "spotify", "apple music", "tidal", "pandora", "soundcloud",
-            "messaging", "whatsapp", "telegram", "signal", "wechat", "line",
-            "chrome - facebook", "chrome - twitter", "chrome - instagram", "chrome - tiktok",
-            "chrome - reddit", "chrome - youtube", "chrome - twitch", "chrome - netflix",
-            "firefox - facebook", "firefox - twitter", "firefox - instagram", "firefox - tiktok",
-            "firefox - reddit", "firefox - youtube", "firefox - twitch", "firefox - netflix"
-        ]
+        prompt = f"""
+        You are a productivity classifier for applications.
         
-        classifications = {"classifications": []}
+        Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+        {app_list_str}
         
-        for app in app_names:
-            app_lower = app.lower()
+        Return ONLY a valid JSON object with this exact structure:
+        {{
+            "classifications": [
+                {{"app": "application name", "category": "PRODUCTIVE"}},
+                {{"app": "application name", "category": "DISTRACTING"}},
+                ...
+            ]
+        }}
+        
+        Rules for classification:
+        - Coding environments (VS Code, IntelliJ, etc.) are PRODUCTIVE
+        - Educational websites and apps are PRODUCTIVE
+        - Document editors (Word, Excel, Google Docs) are PRODUCTIVE
+        - Productivity tools (Notion, Evernote) are PRODUCTIVE
+        - Communication tools for work (Slack, Teams) are PRODUCTIVE
+        - Games are DISTRACTING
+        - Social media (Facebook, Twitter, Instagram) are DISTRACTING
+        - Entertainment (Netflix, YouTube) are DISTRACTING
+        - Messaging apps (WhatsApp, Telegram) are DISTRACTING
+        
+        Do not include any explanations, just return the JSON.
+        """
+        
+        try:
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
             
-            is_productive = any(keyword in app_lower for keyword in productive_keywords)
-            is_distracting = any(keyword in app_lower for keyword in distracting_keywords)
+            print(f"Gemini raw response (local): {response.text}")
             
-            if is_productive and not is_distracting:
-                category = "PRODUCTIVE"
-            elif is_distracting and not is_productive:
-                category = "DISTRACTING"
-            else:
-                category = "NEUTRAL"
+            json_text = response.text
+            if "```json" in json_text:
+                json_text = json_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_text:
+                json_text = json_text.split("```")[1].split("```")[0].strip()
+                
+            classifications = json.loads(json_text)
             
-            classifications["classifications"].append({
-                "app": app,
-                "category": category
-            })
-        
-        return jsonify(classifications), 200
+            if "classifications" not in classifications:
+                raise ValueError("Response missing 'classifications' key")
+                
+            classified_apps = [c.get("app") for c in classifications.get("classifications", [])]
+            missing_apps = [app for app in app_names if app not in classified_apps]
+            
+            if missing_apps:
+                for app in missing_apps:
+                    app_lower = app.lower()
+                    
+                    if any(keyword in app_lower for keyword in ["code", "visual studio", "intellij", "word", "excel", "docs", "notion", "slack", "teams"]):
+                        category = "PRODUCTIVE"
+                    elif any(keyword in app_lower for keyword in ["game", "facebook", "twitter", "instagram", "netflix", "youtube", "telegram", "whatsapp"]):
+                        category = "DISTRACTING"
+                    else:
+                        category = "NEUTRAL"
+                    
+                    classifications["classifications"].append({
+                        "app": app,
+                        "category": category
+                    })
+                    
+            return jsonify(classifications), 200
+            
+        except Exception as e:
+            print(f"Error using Gemini API for classification: {e}")
+            fallback_classifications = {"classifications": []}
+            for app in app_names:
+                app_lower = app.lower()
+                
+                if any(keyword in app_lower for keyword in ["code", "visual studio", "intellij", "word", "excel", "docs", "notion", "slack", "teams"]):
+                    category = "PRODUCTIVE"
+                elif any(keyword in app_lower for keyword in ["game", "facebook", "twitter", "instagram", "netflix", "youtube", "telegram", "whatsapp"]):
+                    category = "DISTRACTING"
+                else:
+                    category = "NEUTRAL"
+                
+                fallback_classifications["classifications"].append({
+                    "app": app,
+                    "category": category
+                })
+            
+            return jsonify(fallback_classifications), 200
         
     except Exception as e:
+        print(f"Error in classify_apps_local: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1275,45 +1455,11 @@ def classify_apps_cached():
                     save_app_classifications()
                         
             except (json.JSONDecodeError, Exception) as e:
-                productive_keywords = [
-                    "code", "visual studio", "intellij", "pycharm", "webstorm", "eclipse", 
-                    "xcode", "android studio", "sublime", "atom", "notepad", "textedit",
-                    "word", "excel", "powerpoint", "docs", "sheets", "slides", 
-                    "notion", "evernote", "onenote", "google drive", "dropbox", "onedrive",
-                    "slack", "teams", "zoom", "meet", "webex", "discord",
-                    "github", "gitlab", "bitbucket", "stackoverflow", "canvas", "blackboard",
-                    "moodle", "coursera", "udemy", "edx", "khan academy", "duolingo",
-                    "terminal", "command prompt", "powershell", "bash", "zsh", "cmd",
-                    "calculator", "calendar", "mail", "outlook", "gmail", "pdf"
-                ]
-                
-                distracting_keywords = [
-                    "game", "steam", "epic games", "origin", "battle.net", "uplay",
-                    "facebook", "twitter", "instagram", "tiktok", "snapchat", "reddit",
-                    "youtube", "twitch", "netflix", "hulu", "disney+", "amazon prime",
-                    "spotify", "apple music", "tidal", "pandora", "soundcloud",
-                    "messaging", "whatsapp", "telegram", "signal", "wechat", "line"
-                ]
-                
-                cache_updated = False
+                print(f"Error using Gemini API for classification: {e}")
+                # If Gemini API fails, set uncached apps to NEUTRAL
                 for app in uncached_apps:
-                    app_lower = app.lower()
-                    
-                    is_productive = any(keyword in app_lower for keyword in productive_keywords)
-                    is_distracting = any(keyword in app_lower for keyword in distracting_keywords)
-                    
-                    if is_productive and not is_distracting:
-                        category = "PRODUCTIVE"
-                    elif is_distracting and not is_productive:
-                        category = "DISTRACTING"
-                    else:
-                        category = "NEUTRAL"
-                    
-                    app_classification_cache[app] = category
-                    cache_updated = True
-                
-                if cache_updated:
-                    save_app_classifications()
+                    app_classification_cache[app] = "NEUTRAL"
+                save_app_classifications()
         
         result = {"classifications": []}
         for app in app_names:
@@ -1385,16 +1531,16 @@ def get_dashboard_data(userId):
         except:
             return jsonify({"error": "User not found"}), 404
 
+        # Get recent sessions without using order_by
         recent_sessions_query = db.collection('sessions')\
             .where('userId', '==', userId)\
-            .order_by('createdAt', direction=firestore.Query.DESCENDING)\
             .limit(5)
 
         recent_sessions = []
         for doc in recent_sessions_query.stream():
             session_data = doc.to_dict()
-            session_data['sessionId'] = doc.id
-
+            session_id = doc.id
+            
             created_at = session_data.get("createdAt")
             date_str = "Unknown date"
             if created_at:
@@ -1406,28 +1552,49 @@ def get_dashboard_data(userId):
 
             activities = session_data.get("activities", "")
             total_seconds = 0
+            app_names = []
+            
+            # Improved parsing logic for activity data
             for line in activities.split("\n"):
-                if ": " in line:
-                    _, duration_str = line.split(": ", 1)
-                    time_parts = duration_str.strip().split(":")
-                    if len(time_parts) == 3:
-                        try:
-                            hours = int(time_parts[0])
-                            minutes = int(time_parts[1])
-                            seconds = int(time_parts[2])
-                            total_seconds += hours * 3600 + minutes * 60 + seconds
-                        except:
-                            pass
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Find the last occurrence of ": " which precedes the time
+                last_colon_index = line.rfind(": ")
+                if last_colon_index == -1:
+                    continue
+                    
+                app_name = line[:last_colon_index].strip()
+                duration_str = line[last_colon_index + 2:].strip()
+                
+                if not app_name or not duration_str:
+                    continue
+                    
+                if app_name and app_name not in app_names:
+                    app_names.append(app_name)
+
+                time_parts = duration_str.split(":")
+                if len(time_parts) == 3:
+                    try:
+                        hours = int(time_parts[0])
+                        minutes = int(time_parts[1])
+                        seconds = int(time_parts[2])
+                        total_seconds += hours * 3600 + minutes * 60 + seconds
+                    except:
+                        pass
 
             hours = total_seconds // 3600
             minutes = (total_seconds % 3600) // 60
             duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
             session_summary = {
-                "sessionId": doc.id,
+                "sessionId": session_id,
                 "date": date_str,
                 "duration": duration,
-                "productivityScore": round(productivity_score, 1)
+                "productivityScore": round(productivity_score, 1),
+                "appCount": len(app_names),
+                "topApps": app_names[:3] if app_names else []
             }
 
             recent_sessions.append(session_summary)
@@ -1454,61 +1621,52 @@ def get_dashboard_data(userId):
             app_names = []
             app_durations = {}
 
+            # Improved parsing logic for activity data
             for line in activities.split("\n"):
-                if ": " in line:
-                    app_name, duration_str = line.split(": ", 1)
-                    app_name = app_name.strip()
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Find the last occurrence of ": " which precedes the time
+                last_colon_index = line.rfind(": ")
+                if last_colon_index == -1:
+                    continue
+                    
+                app_name = line[:last_colon_index].strip()
+                duration_str = line[last_colon_index + 2:].strip()
+                
+                if not app_name or not duration_str:
+                    continue
 
-                    if not app_name:
-                        continue
+                if app_name not in app_names:
+                    app_names.append(app_name)
 
-                    if app_name not in app_names:
-                        app_names.append(app_name)
+                time_parts = duration_str.split(":")
+                if len(time_parts) == 3:
+                    try:
+                        hours = int(time_parts[0])
+                        minutes = int(time_parts[1])
+                        seconds = int(time_parts[2])
+                        app_seconds = hours * 3600 + minutes * 60 + seconds
 
-                    time_parts = duration_str.strip().split(":")
-                    if len(time_parts) == 3:
-                        try:
-                            hours = int(time_parts[0])
-                            minutes = int(time_parts[1])
-                            seconds = int(time_parts[2])
-                            app_seconds = hours * 3600 + minutes * 60 + seconds
+                        total_time_seconds += app_seconds
 
-                            total_time_seconds += app_seconds
-
+                        if app_name in app_durations:
+                            app_durations[app_name] += app_seconds
+                        else:
                             app_durations[app_name] = app_seconds
-                        except:
-                            pass
+                    except:
+                        pass
 
             if app_names:
-                app_list_str = ', '.join(app_names)
-
-                prompt = f"""
-                Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
-                {app_list_str}
-                
-                Return the classification in a JSON format like this:
-                {{
-                    "classifications": [
-                        {{"app": "application name", "category": "PRODUCTIVE"}},
-                        {{"app": "application name", "category": "DISTRACTING"}},
-                        ...
-                    ]
-                }}
-                
-                Consider coding environments, educational websites, document editors, and productivity tools as PRODUCTIVE.
-                Consider games, social media, entertainment, and streaming sites as DISTRACTING.
-                Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
-                """
-
-                model = genai.GenerativeModel("gemini-2.0-flash")
-                response = model.generate_content(prompt)
-
+                # Use our cached classification system instead of direct Gemini call
                 try:
-                    classifications = json.loads(response.text)
-
+                    classifications_response = classify_apps_cached_internal(app_names)
+                    classifications = classifications_response.get('classifications', [])
+                    
                     for app_name, seconds in app_durations.items():
                         category = "NEUTRAL"
-                        for classification in classifications.get('classifications', []):
+                        for classification in classifications:
                             if classification.get('app') == app_name:
                                 category = classification.get('category')
                                 break
@@ -1519,7 +1677,15 @@ def get_dashboard_data(userId):
                             total_distracting_seconds += seconds
 
                 except Exception as e:
-                    print(f"Error parsing Gemini response: {e}")
+                    print(f"Error classifying apps in dashboard: {e}")
+                    # Fallback to simple classification if the cached system fails
+                    for app_name, seconds in app_durations.items():
+                        app_lower = app_name.lower()
+                        
+                        if any(keyword in app_lower for keyword in ["code", "visual studio", "intellij", "word", "excel", "docs", "notion", "slack", "teams", "cursor", "warp"]):
+                            total_productive_seconds += seconds
+                        elif any(keyword in app_lower for keyword in ["game", "facebook", "twitter", "instagram", "netflix", "youtube", "telegram", "whatsapp"]):
+                            total_distracting_seconds += seconds
 
         avg_productivity = sum(productivity_scores) / \
             max(1, len(productivity_scores))
@@ -1546,6 +1712,7 @@ def get_dashboard_data(userId):
         return jsonify(dashboard_data), 200
 
     except Exception as e:
+        print(f"Error in get_dashboard_data: {e}")
         return jsonify({"error": str(e)}), 500
 
 
