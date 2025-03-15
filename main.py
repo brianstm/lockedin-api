@@ -385,13 +385,14 @@ def get_group(groupName):
         return jsonify({"error": str(e)}), 500
 
 
-def gemini_generate(prompt, topic = "" ):
+def gemini_generate(prompt, topic=""):
     model = genai.GenerativeModel("gemini-2.0-flash")
     full_prompt = f"{prompt} {topic}"
     response = model.generate_content(full_prompt)
     return jsonify({
         "response": response.text
     })
+
 
 @app.route('/quiz/generate', methods=['POST'])
 def generate_quiz():
@@ -408,10 +409,10 @@ def generate_quiz():
             "Generate 5 multiple-choice quiz question about this topic. "
             "The question must be concise and directly related to the topic. "
             "Provide exactly four answer choices labeled A, B, C, and D. "
-            "Do not include explanations, just directly return the question and options.",topic)
+            "Do not include explanations, just directly return the question and options.", topic)
         question_text = question_response.get_json()['response']
 
-        correct_answer_response =  gemini_generate(
+        correct_answer_response = gemini_generate(
             "For the following multiple-choice question, return only the correct answer letter. "
             "Respond with only a single character: A, B, C, or D. "
             "Do not include explanations, introductions, or extra text. "
@@ -433,7 +434,309 @@ def generate_quiz():
         }
 
         return jsonify(quiz), 200
-    
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/user/<userId>', methods=['GET'])
+def get_user_profile(userId):
+    try:
+        user = auth.get_user(userId)
+
+        sessions = []
+        sessions_query = db.collection('sessions').where(
+            'userId', '==', userId).stream()
+
+        for session_doc in sessions_query:
+            session_data = session_doc.to_dict()
+            session_data['sessionId'] = session_doc.id
+            sessions.append(session_data)
+
+        user_groups = []
+        groups_query = db.collection('groups').stream()
+
+        for group_doc in groups_query:
+            group_data = group_doc.to_dict()
+            members = group_data.get('members', [])
+
+            if any(member.get('userId') == userId for member in members):
+                group_data['groupId'] = group_doc.id
+                user_groups.append(group_data)
+
+        return jsonify({
+            "userId": user.uid,
+            "displayName": user.display_name,
+            "email": user.email,
+            "sessions": sessions,
+            "groups": user_groups
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/user/<userId>/sessions', methods=['GET'])
+def get_user_sessions(userId):
+    try:
+        limit = request.args.get('limit', default=10, type=int)
+        start_after = request.args.get('startAfter', default=None, type=str)
+
+        query = db.collection('sessions').where('userId', '==', userId).order_by(
+            'createdAt', direction=firestore.Query.DESCENDING).limit(limit)
+
+        if start_after:
+            start_doc = db.collection('sessions').document(start_after).get()
+            if start_doc.exists:
+                query = query.start_after(start_doc)
+
+        sessions = []
+        for doc in query.stream():
+            session_data = doc.to_dict()
+            session_data['sessionId'] = doc.id
+            sessions.append(session_data)
+
+        return jsonify({
+            "userId": userId,
+            "sessions": sessions,
+            "hasMore": len(sessions) == limit
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/session/<sessionId>/details', methods=['GET'])
+def get_session_details(sessionId):
+    try:
+        session_ref = db.collection('sessions').document(sessionId)
+        session_data = session_ref.get().to_dict()
+
+        if not session_data:
+            return jsonify({"error": "Session not found"}), 404
+
+        activities = session_data.get("activities", "")
+
+        prompt = """
+        Analyze this activity log and provide:
+        1. Most used productive application
+        2. Most used distracting application
+        3. Productivity percentage (time spent on productive apps vs total time)
+        Return the results in JSON format with the following structure:
+        {
+            "mostProductiveApp": "app name",
+            "mostDistractingApp": "app name",
+            "productivityPercentage": 75.5
+        }
+        Activity Log: """ + activities
+
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+
+        try:
+            analytics = json.loads(response.text)
+        except:
+            analytics = {
+                "mostProductiveApp": "Unknown",
+                "mostDistractingApp": "Unknown",
+                "productivityPercentage": 0
+            }
+
+        return jsonify({
+            "sessionId": sessionId,
+            "userId": session_data.get("userId"),
+            "groupId": session_data.get("groupId"),
+            "pomodoro": session_data.get("pomodoro"),
+            "activities": activities,
+            "analytics": analytics
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/group/<groupId>/details', methods=['GET'])
+def get_group_details(groupId):
+    try:
+        group_ref = db.collection('groups').document(groupId)
+        group_data = group_ref.get().to_dict()
+
+        if not group_data:
+            return jsonify({"error": "Group not found"}), 404
+
+        members = group_data.get('members', [])
+        detailed_members = []
+
+        for member in members:
+            userId = member.get('userId')
+            try:
+                user = auth.get_user(userId)
+                detailed_members.append({
+                    "userId": userId,
+                    "displayName": user.display_name,
+                    "email": user.email,
+                    "score": member.get('score', 0)
+                })
+            except:
+                detailed_members.append({
+                    "userId": userId,
+                    "displayName": "Unknown",
+                    "email": "Unknown",
+                    "score": member.get('score', 0)
+                })
+
+        return jsonify({
+            "groupId": groupId,
+            "groupName": group_data.get('groupName'),
+            "createdBy": group_data.get('createdBy'),
+            "createdAt": group_data.get('createdAt'),
+            "members": detailed_members
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/stats/productivity', methods=['GET'])
+def get_productivity_stats():
+    try:
+        userId = request.args.get('userId')
+        period = request.args.get('period', default='week', type=str)
+
+        if not userId:
+            return jsonify({"error": "Missing userId parameter"}), 400
+
+        now = time.time()
+
+        if period == 'day':
+            start_time = now - (24 * 60 * 60)
+        elif period == 'week':
+            start_time = now - (7 * 24 * 60 * 60)
+        elif period == 'month':
+            start_time = now - (30 * 24 * 60 * 60)
+        else:
+            return jsonify({"error": "Invalid period. Use 'day', 'week', or 'month'"}), 400
+
+        sessions = []
+        sessions_query = db.collection('sessions').where(
+            'userId', '==', userId).stream()
+
+        total_score = 0
+        session_count = 0
+
+        for session_doc in sessions_query:
+            session_data = session_doc.to_dict()
+
+            if 'productivityScore' not in session_data:
+                continue
+
+            sessions.append({
+                "sessionId": session_doc.id,
+                "productivityScore": session_data.get("productivityScore", 0),
+                "activities": session_data.get("activities", "")
+            })
+
+            total_score += session_data.get("productivityScore", 0)
+            session_count += 1
+
+        avg_score = total_score / max(session_count, 1)
+
+        return jsonify({
+            "userId": userId,
+            "period": period,
+            "averageProductivityScore": round(avg_score, 2),
+            "sessionCount": session_count,
+            "sessions": sessions
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/stats/applications', methods=['GET'])
+def get_app_usage_stats():
+    try:
+        userId = request.args.get('userId')
+
+        if not userId:
+            return jsonify({"error": "Missing userId parameter"}), 400
+
+        sessions_query = db.collection('sessions').where(
+            'userId', '==', userId).stream()
+
+        app_usage = {}
+
+        for session_doc in sessions_query:
+            session_data = session_doc.to_dict()
+            activities = session_data.get("activities", "")
+
+            for line in activities.split("\n"):
+                if ": " in line:
+                    app_name, duration_str = line.split(": ", 1)
+                    app_name = app_name.strip()
+
+                    if not app_name:
+                        continue
+
+                    time_parts = duration_str.strip().split(":")
+                    if len(time_parts) == 3:
+                        try:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = int(time_parts[2])
+                            total_seconds = hours * 3600 + minutes * 60 + seconds
+
+                            if app_name in app_usage:
+                                app_usage[app_name] += total_seconds
+                            else:
+                                app_usage[app_name] = total_seconds
+                        except:
+                            pass
+
+        formatted_usage = {}
+        for app, seconds in app_usage.items():
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            remaining_seconds = seconds % 60
+            formatted_usage[app] = {
+                "totalSeconds": seconds,
+                "formatted": f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
+            }
+
+        sorted_usage = dict(sorted(formatted_usage.items(),
+                            key=lambda x: x[1]["totalSeconds"], reverse=True))
+
+        return jsonify({
+            "userId": userId,
+            "appUsage": sorted_usage
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/quiz/history', methods=['GET'])
+def get_quiz_history():
+    try:
+        userId = request.args.get('userId')
+
+        if not userId:
+            return jsonify({"error": "Missing userId parameter"}), 400
+
+        quizzes = []
+        quizzes_query = db.collection('quizzes').where(
+            'userId', '==', userId).stream()
+
+        for quiz_doc in quizzes_query:
+            quiz_data = quiz_doc.to_dict()
+            quiz_data['quizId'] = quiz_doc.id
+            quizzes.append(quiz_data)
+
+        return jsonify({
+            "userId": userId,
+            "quizzes": quizzes
+        }), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
