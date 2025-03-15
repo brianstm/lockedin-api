@@ -203,13 +203,6 @@ def get_group(groupName):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/quiz/generate', methods=['POST'])
-def generate_quiz():
-    data = request.json
-    sessionID = data.get('sessionId')
-    userID = data.get('userId')
-    topic = data.get('topic')
-
 
     
 if __name__ == "__main__":
