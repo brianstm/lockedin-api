@@ -42,6 +42,33 @@ genai.configure(api_key=GOOGLE_GEMINI_KEY)
 app = Flask(__name__)
 CORS(app)
 
+# Global cache for app classifications
+app_classification_cache = {}
+
+# Load app classifications from Firestore on startup
+def load_app_classifications():
+    try:
+        classifications_ref = db.collection('app_classifications').document('cache')
+        doc = classifications_ref.get()
+        
+        if doc.exists:
+            global app_classification_cache
+            app_classification_cache = doc.to_dict() or {}
+            print(f"Loaded {len(app_classification_cache)} app classifications from Firestore")
+    except Exception as e:
+        print(f"Error loading app classifications: {e}")
+
+# Save app classifications to Firestore
+def save_app_classifications():
+    try:
+        classifications_ref = db.collection('app_classifications').document('cache')
+        classifications_ref.set(app_classification_cache)
+        print(f"Saved {len(app_classification_cache)} app classifications to Firestore")
+    except Exception as e:
+        print(f"Error saving app classifications: {e}")
+
+# Load classifications on startup
+load_app_classifications()
 
 @app.route("/", methods=["GET"])
 def home():
@@ -1030,6 +1057,322 @@ def get_session_activity_data(sessionId):
             "summary": summary
         }), 200
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/classify-apps', methods=['POST'])
+def classify_apps():
+    try:
+        data = request.json
+        app_names = data.get('appNames', [])
+        
+        if not app_names or not isinstance(app_names, list):
+            return jsonify({"error": "Missing or invalid appNames parameter. Expected a list of strings."}), 400
+        
+        if len(app_names) == 0:
+            return jsonify({"classifications": []}), 200
+            
+        app_list_str = ', '.join(app_names)
+        
+        prompt = f"""
+        Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+        {app_list_str}
+        
+        Return the classification in a JSON format like this:
+        {{
+            "classifications": [
+                {{"app": "application name", "category": "PRODUCTIVE"}},
+                {{"app": "application name", "category": "DISTRACTING"}},
+                ...
+            ]
+        }}
+        
+        Consider coding environments, educational websites, document editors, productivity tools, 
+        and learning platforms as PRODUCTIVE.
+        
+        Consider games, social media, entertainment, streaming sites, and non-educational video 
+        platforms as DISTRACTING.
+        
+        Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
+        """
+        
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        
+        try:
+            classifications = json.loads(response.text)
+            return jsonify(classifications), 200
+        except json.JSONDecodeError:
+            # Fallback classification if Gemini doesn't return valid JSON
+            fallback_classifications = {"classifications": []}
+            
+            productive_keywords = [
+                "code", "visual studio", "intellij", "pycharm", "webstorm", "eclipse", 
+                "xcode", "android studio", "sublime", "atom", "notepad", "textedit",
+                "word", "excel", "powerpoint", "docs", "sheets", "slides", 
+                "notion", "evernote", "onenote", "google drive", "dropbox", "onedrive",
+                "slack", "teams", "zoom", "meet", "webex", "discord",
+                "github", "gitlab", "bitbucket", "stackoverflow", "canvas", "blackboard",
+                "moodle", "coursera", "udemy", "edx", "khan academy", "duolingo",
+                "terminal", "command prompt", "powershell", "bash", "zsh", "cmd",
+                "calculator", "calendar", "mail", "outlook", "gmail", "pdf"
+            ]
+            
+            distracting_keywords = [
+                "game", "steam", "epic games", "origin", "battle.net", "uplay",
+                "facebook", "twitter", "instagram", "tiktok", "snapchat", "reddit",
+                "youtube", "twitch", "netflix", "hulu", "disney+", "amazon prime",
+                "spotify", "apple music", "tidal", "pandora", "soundcloud",
+                "messaging", "whatsapp", "telegram", "signal", "wechat", "line"
+            ]
+            
+            for app in app_names:
+                app_lower = app.lower()
+                
+                is_productive = any(keyword in app_lower for keyword in productive_keywords)
+                is_distracting = any(keyword in app_lower for keyword in distracting_keywords)
+                
+                if is_productive and not is_distracting:
+                    category = "PRODUCTIVE"
+                elif is_distracting and not is_productive:
+                    category = "DISTRACTING"
+                else:
+                    # If ambiguous or neither, default to NEUTRAL
+                    category = "NEUTRAL"
+                
+                fallback_classifications["classifications"].append({
+                    "app": app,
+                    "category": category
+                })
+            
+            return jsonify(fallback_classifications), 200
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/classify-apps/local', methods=['POST'])
+def classify_apps_local():
+    try:
+        data = request.json
+        app_names = data.get('appNames', [])
+        
+        if not app_names or not isinstance(app_names, list):
+            return jsonify({"error": "Missing or invalid appNames parameter. Expected a list of strings."}), 400
+        
+        if len(app_names) == 0:
+            return jsonify({"classifications": []}), 200
+        
+        productive_keywords = [
+            "code", "visual studio", "intellij", "pycharm", "webstorm", "eclipse", 
+            "xcode", "android studio", "sublime", "atom", "notepad", "textedit",
+            "word", "excel", "powerpoint", "docs", "sheets", "slides", 
+            "notion", "evernote", "onenote", "google drive", "dropbox", "onedrive",
+            "slack", "teams", "zoom", "meet", "webex", "discord",
+            "github", "gitlab", "bitbucket", "stackoverflow", "canvas", "blackboard",
+            "moodle", "coursera", "udemy", "edx", "khan academy", "duolingo",
+            "terminal", "command prompt", "powershell", "bash", "zsh", "cmd",
+            "calculator", "calendar", "mail", "outlook", "gmail", "pdf",
+            "chrome - canvas", "chrome - github", "chrome - gitlab", "chrome - stackoverflow",
+            "chrome - docs", "chrome - sheets", "chrome - slides", "chrome - drive",
+            "firefox - canvas", "firefox - github", "firefox - gitlab", "firefox - stackoverflow",
+            "firefox - docs", "firefox - sheets", "firefox - slides", "firefox - drive"
+        ]
+        
+        distracting_keywords = [
+            "game", "steam", "epic games", "origin", "battle.net", "uplay",
+            "facebook", "twitter", "instagram", "tiktok", "snapchat", "reddit",
+            "youtube", "twitch", "netflix", "hulu", "disney+", "amazon prime",
+            "spotify", "apple music", "tidal", "pandora", "soundcloud",
+            "messaging", "whatsapp", "telegram", "signal", "wechat", "line",
+            "chrome - facebook", "chrome - twitter", "chrome - instagram", "chrome - tiktok",
+            "chrome - reddit", "chrome - youtube", "chrome - twitch", "chrome - netflix",
+            "firefox - facebook", "firefox - twitter", "firefox - instagram", "firefox - tiktok",
+            "firefox - reddit", "firefox - youtube", "firefox - twitch", "firefox - netflix"
+        ]
+        
+        classifications = {"classifications": []}
+        
+        for app in app_names:
+            app_lower = app.lower()
+            
+            is_productive = any(keyword in app_lower for keyword in productive_keywords)
+            is_distracting = any(keyword in app_lower for keyword in distracting_keywords)
+            
+            if is_productive and not is_distracting:
+                category = "PRODUCTIVE"
+            elif is_distracting and not is_productive:
+                category = "DISTRACTING"
+            else:
+                category = "NEUTRAL"
+            
+            classifications["classifications"].append({
+                "app": app,
+                "category": category
+            })
+        
+        return jsonify(classifications), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/classify-apps/cached', methods=['POST'])
+def classify_apps_cached():
+    try:
+        data = request.json
+        app_names = data.get('appNames', [])
+        
+        if not app_names or not isinstance(app_names, list):
+            return jsonify({"error": "Missing or invalid appNames parameter. Expected a list of strings."}), 400
+        
+        if len(app_names) == 0:
+            return jsonify({"classifications": []}), 200
+        
+        uncached_apps = [app for app in app_names if app not in app_classification_cache]
+        
+        if uncached_apps:
+            app_list_str = ', '.join(uncached_apps)
+            
+            prompt = f"""
+            Classify the following applications as either PRODUCTIVE or DISTRACTING for a student or professional:
+            {app_list_str}
+            
+            Return the classification in a JSON format like this:
+            {{
+                "classifications": [
+                    {{"app": "application name", "category": "PRODUCTIVE"}},
+                    {{"app": "application name", "category": "DISTRACTING"}},
+                    ...
+                ]
+            }}
+            
+            Consider coding environments, educational websites, document editors, productivity tools, 
+            and learning platforms as PRODUCTIVE.
+            
+            Consider games, social media, entertainment, streaming sites, and non-educational video 
+            platforms as DISTRACTING.
+            
+            Only use the categories PRODUCTIVE or DISTRACTING. Return valid JSON.
+            """
+            
+            try:
+                model = genai.GenerativeModel("gemini-2.0-flash")
+                response = model.generate_content(prompt)
+                
+                classifications = json.loads(response.text)
+                
+                cache_updated = False
+                for classification in classifications.get('classifications', []):
+                    app = classification.get('app')
+                    category = classification.get('category')
+                    if app and category:
+                        app_classification_cache[app] = category
+                        cache_updated = True
+                
+                if cache_updated:
+                    save_app_classifications()
+                        
+            except (json.JSONDecodeError, Exception) as e:
+                productive_keywords = [
+                    "code", "visual studio", "intellij", "pycharm", "webstorm", "eclipse", 
+                    "xcode", "android studio", "sublime", "atom", "notepad", "textedit",
+                    "word", "excel", "powerpoint", "docs", "sheets", "slides", 
+                    "notion", "evernote", "onenote", "google drive", "dropbox", "onedrive",
+                    "slack", "teams", "zoom", "meet", "webex", "discord",
+                    "github", "gitlab", "bitbucket", "stackoverflow", "canvas", "blackboard",
+                    "moodle", "coursera", "udemy", "edx", "khan academy", "duolingo",
+                    "terminal", "command prompt", "powershell", "bash", "zsh", "cmd",
+                    "calculator", "calendar", "mail", "outlook", "gmail", "pdf"
+                ]
+                
+                distracting_keywords = [
+                    "game", "steam", "epic games", "origin", "battle.net", "uplay",
+                    "facebook", "twitter", "instagram", "tiktok", "snapchat", "reddit",
+                    "youtube", "twitch", "netflix", "hulu", "disney+", "amazon prime",
+                    "spotify", "apple music", "tidal", "pandora", "soundcloud",
+                    "messaging", "whatsapp", "telegram", "signal", "wechat", "line"
+                ]
+                
+                cache_updated = False
+                for app in uncached_apps:
+                    app_lower = app.lower()
+                    
+                    is_productive = any(keyword in app_lower for keyword in productive_keywords)
+                    is_distracting = any(keyword in app_lower for keyword in distracting_keywords)
+                    
+                    if is_productive and not is_distracting:
+                        category = "PRODUCTIVE"
+                    elif is_distracting and not is_productive:
+                        category = "DISTRACTING"
+                    else:
+                        category = "NEUTRAL"
+                    
+                    app_classification_cache[app] = category
+                    cache_updated = True
+                
+                if cache_updated:
+                    save_app_classifications()
+        
+        result = {"classifications": []}
+        for app in app_names:
+            category = app_classification_cache.get(app, "NEUTRAL")
+            result["classifications"].append({
+                "app": app,
+                "category": category
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/classify-apps/update', methods=['POST'])
+def update_app_classification():
+    try:
+        data = request.json
+        app_name = data.get('appName')
+        category = data.get('category')
+        
+        if not app_name:
+            return jsonify({"error": "Missing appName parameter"}), 400
+            
+        if not category or category not in ["PRODUCTIVE", "DISTRACTING", "NEUTRAL"]:
+            return jsonify({"error": "Invalid category. Must be one of: PRODUCTIVE, DISTRACTING, NEUTRAL"}), 400
+        
+        app_classification_cache[app_name] = category
+        
+        save_app_classifications()
+        
+        return jsonify({
+            "message": f"Successfully updated classification for {app_name} to {category}",
+            "app": app_name,
+            "category": category
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/classify-apps/all', methods=['GET'])
+def get_all_app_classifications():
+    try:
+        classifications = []
+        for app, category in app_classification_cache.items():
+            classifications.append({
+                "app": app,
+                "category": category
+            })
+        
+        classifications.sort(key=lambda x: x["app"])
+        
+        return jsonify({
+            "classifications": classifications,
+            "count": len(classifications)
+        }), 200
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
