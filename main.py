@@ -1456,7 +1456,6 @@ def classify_apps_cached():
                         
             except (json.JSONDecodeError, Exception) as e:
                 print(f"Error using Gemini API for classification: {e}")
-                # If Gemini API fails, set uncached apps to NEUTRAL
                 for app in uncached_apps:
                     app_classification_cache[app] = "NEUTRAL"
                 save_app_classifications()
@@ -1531,7 +1530,6 @@ def get_dashboard_data(userId):
         except:
             return jsonify({"error": "User not found"}), 404
 
-        # Get recent sessions without using order_by
         recent_sessions_query = db.collection('sessions')\
             .where('userId', '==', userId)\
             .limit(5)
@@ -1554,13 +1552,11 @@ def get_dashboard_data(userId):
             total_seconds = 0
             app_names = []
             
-            # Improved parsing logic for activity data
             for line in activities.split("\n"):
                 line = line.strip()
                 if not line:
                     continue
                     
-                # Find the last occurrence of ": " which precedes the time
                 last_colon_index = line.rfind(": ")
                 if last_colon_index == -1:
                     continue
@@ -1621,13 +1617,11 @@ def get_dashboard_data(userId):
             app_names = []
             app_durations = {}
 
-            # Improved parsing logic for activity data
             for line in activities.split("\n"):
                 line = line.strip()
                 if not line:
                     continue
                     
-                # Find the last occurrence of ": " which precedes the time
                 last_colon_index = line.rfind(": ")
                 if last_colon_index == -1:
                     continue
@@ -1659,7 +1653,6 @@ def get_dashboard_data(userId):
                         pass
 
             if app_names:
-                # Use our cached classification system instead of direct Gemini call
                 try:
                     classifications_response = classify_apps_cached_internal(app_names)
                     classifications = classifications_response.get('classifications', [])
@@ -1678,7 +1671,6 @@ def get_dashboard_data(userId):
 
                 except Exception as e:
                     print(f"Error classifying apps in dashboard: {e}")
-                    # Fallback to simple classification if the cached system fails
                     for app_name, seconds in app_durations.items():
                         app_lower = app_name.lower()
                         
