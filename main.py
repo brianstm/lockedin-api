@@ -1,7 +1,7 @@
 import os
 import json
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import credentials, auth, firestore
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import google.generativeai as genai
@@ -26,6 +26,7 @@ firebase_credentials = {
 
 cred = credentials.Certificate(firebase_credentials)
 firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 GOOGLE_GEMINI_KEY = os.getenv("GOOGLE_GEMINI_KEY")
 genai.configure(api_key=GOOGLE_GEMINI_KEY)
@@ -103,5 +104,102 @@ def register():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+"GROUP MANAGEMENT"
+@app.route('/groups/create', methods=['POST'])
+def create():
+    data = request.json
+    groupName = data.get('groupName')
+    userID = data.get('userId')
+
+    if not groupName:
+        return jsonify({"error": "Missing groupName"}), 400
+        
+    if not userID:
+        return jsonify({"error": "Missing userID"}), 400
+    
+    try:
+        user = auth.get_user(userID)
+        group_ref = db.collection('groups').document()  
+        group_ref.set({
+            'groupName': groupName,
+            'createdBy': userID,  
+            'members': [userID],  
+            'createdAt': firestore.SERVER_TIMESTAMP
+        })
+
+        return jsonify({
+            "message": "Group created",
+            "groupCode": group_ref.id
+        }), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/groups/join', methods=['POST'])
+def join():
+    data = request.json
+    groupCode = data.get('groupCode')
+    userID = data.get('userId')
+
+    if not groupCode:
+        return jsonify({"error": "Missing groupCode"}), 400
+    
+    if not userID:
+        return jsonify({"error": "Missing userID"}), 400
+    
+    try:
+        user = auth.get_user(userID)
+        group_ref = db.collection('groups').document(groupCode)
+        group_doc = group_ref.get()
+
+        if not group_doc.exists:
+            return jsonify({"error": "Group not found"}), 404
+        
+        group_data = group_doc.to_dict()
+        members = group_data.get('members')
+
+        if userID in members:
+            return jsonify({"error": "User already in group"}), 400
+        
+        members.append(userID) 
+        group_ref.update({
+            'members': members
+        })  
+
+        return jsonify({
+            "message": "User joined group",
+            "groupCode": groupCode,
+            "members": members
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/groups/<groupName>/members', methods=['GET'])
+def get_group(groupName):
+    try:
+        # Query Firestore for groups with the given groupName
+        group_query = db.collection('groups').where('groupName', '==', groupName).stream()
+
+        group_data = None
+        for group_doc in group_query:
+            group_data = group_doc.to_dict()
+            break  # Get the first matching group
+
+        if not group_data:
+            return jsonify({"error": "Group not found"}), 404
+
+        return jsonify(group_data), 200
+
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
+
+
+    
+
+
