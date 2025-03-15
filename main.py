@@ -418,49 +418,121 @@ def gemini_generate(prompt, topic = "" ):
     response = model.generate_content(full_prompt)
     return response.text
 
+def extract_options_from_question(question_text):
+    """
+    Extract options from a question text that contains options in the format:
+    A. Option text
+    B. Option text
+    C. Option text
+    D. Option text
+    
+    Returns a dictionary with option letters as keys and option text as values.
+    """
+    options = {}
+    lines = question_text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        if line and len(line) > 2 and line[0] in 'ABCD' and line[1] == '.':
+            option_letter = line[0]
+            option_text = line[2:].strip()
+            options[option_letter] = option_text
+            
+    return options
+
 @app.route('/quiz/generate', methods=['POST'])
 def generate_quiz():
     data = request.json
     sessionID = data.get('sessionId')
     userID = data.get('userId')
     topic = data.get('topic')
+    num_questions = data.get('numQuestions', 5)  
 
     if not topic:
         return jsonify({"error": "Missing topic"}), 400
 
     try:
-        question_response = gemini_generate(
-            "Generate a multiple-choice quiz question about this topic. "
-            "The question must be concise and directly related to the topic. "
-            "Provide exactly four answer choices labeled A, B, C, and D. "
-            "Do not include explanations, just directly return the question and options, please directly start with the questions dont talk about anything else.",topic)
-        question_text = question_response
-
-        correct_answer_response =  gemini_generate(
-            "For the following multiple-choice question, return only the correct answer letter. "
-            "Respond with a single character: A, B, C, or D."
-            "Do not include explanations, introductions, or extra text."
-            "Just return the correct answer letter.")
-        correct_answer = correct_answer_response
+        questions = []
+        
+        for i in range(num_questions):
+            question_prompt = (
+                f"Generate a multiple-choice quiz question about {topic}. "
+                "The question must be concise and directly related to the topic. "
+                "Provide exactly four answer choices labeled A, B, C, and D. "
+                "Format the question with the question text first, followed by options on separate lines as: "
+                "A. [option text]\nB. [option text]\nC. [option text]\nD. [option text]"
+                "Do not include explanations, just directly return the question and options. "
+                "Please directly start with the question, don't talk about anything else."
+            )
+            
+            question_response = gemini_generate(question_prompt, "")
+            question_text = question_response.strip()
+            
+            extracted_options = extract_options_from_question(question_text)
+            
+            if len(extracted_options) != 4:
+                options_list = ['A', 'B', 'C', 'D']
+            else:
+                options_list = [
+                    {'letter': 'A', 'text': extracted_options.get('A', '')},
+                    {'letter': 'B', 'text': extracted_options.get('B', '')},
+                    {'letter': 'C', 'text': extracted_options.get('C', '')},
+                    {'letter': 'D', 'text': extracted_options.get('D', '')}
+                ]
+            
+            correct_answer_prompt = (
+                f"For the following multiple-choice question, return only the correct answer letter. "
+                f"Respond with a single character: A, B, C, or D. "
+                f"Do not include explanations, introductions, or extra text. "
+                f"Just return the correct answer letter.\n\n{question_text}"
+            )
+            
+            correct_answer_response = gemini_generate(correct_answer_prompt, "")
+            correct_answer = correct_answer_response.strip()
+            
+            if len(correct_answer) > 0:
+                correct_answer = correct_answer[0].upper()
+                if correct_answer not in ['A', 'B', 'C', 'D']:
+                    correct_answer = random.choice(['A', 'B', 'C', 'D'])
+            else:
+                correct_answer = random.choice(['A', 'B', 'C', 'D'])
+            
+            questions.append({
+                "questionText": question_text,
+                "options": options_list,
+                "correctAnswer": correct_answer
+            })
 
         quizId = str(uuid.uuid4())
 
         quiz = {
             "quizId": quizId,
             "topic": topic,
-            "questions": [
-                {
-                    "questionText": question_text,
-                    "options": ['A', 'B', 'C', 'D'],
-                    "answers": correct_answer,
-                }
-            ],
+            "userId": userID,
+            "sessionId": sessionID,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "questions": questions,
         }
         db.collection('quizzes').document(quizId).set(quiz)
+        
+        client_quiz = {
+            "quizId": quizId,
+            "topic": topic,
+            "questions": [
+                {
+                    "questionText": q["questionText"],
+                    "options": q["options"]
+                } for q in questions
+            ]
+        }
 
-        return jsonify(quiz), 200
+        return jsonify(client_quiz), 200
     
     except Exception as e:
+        print(f"Error generating quiz: {e}")
         return jsonify({"error": str(e)}), 500
     
 @app.route('/quiz/<quizId>', methods=['GET'])
@@ -473,7 +545,19 @@ def get_quiz(quizId):
             return jsonify({"error": "Quiz not found"}), 404
 
         quiz_data = quiz_snapshot.to_dict()
-        return jsonify(quiz_data), 200
+        
+        client_quiz = {
+            "quizId": quizId,
+            "topic": quiz_data.get("topic", ""),
+            "questions": [
+                {
+                    "questionText": q.get("questionText", ""),
+                    "options": q.get("options", ['A', 'B', 'C', 'D'])
+                } for q in quiz_data.get("questions", [])
+            ]
+        }
+        
+        return jsonify(client_quiz), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -483,12 +567,12 @@ def get_quiz(quizId):
 def submit_quiz():
     data = request.json
     quizId = data.get('quizId')
-    userID = data.get('userId')
+    userId = data.get('userId')
     answers = data.get('answers')
 
     if not quizId:
         return jsonify({"error": "Missing quizId"}), 400
-    if not userID:
+    if not userId:
         return jsonify({"error": "Missing userId"}), 400
     if not answers or not isinstance(answers, list):
         return jsonify({"error": "Answers must be a non-empty list"}), 400
@@ -501,19 +585,62 @@ def submit_quiz():
             return jsonify({"error": "Quiz not found"}), 404
 
         quiz_data = quiz_snapshot.to_dict()
-        correct_answers = [q.get("answers") for q in quiz_data.get("questions")]
-
-        if not correct_answers:
-            return jsonify({"error": "Quiz has no correct answers stored"}), 500
-
-        score = sum(1 for i in range(min(len(answers), len(correct_answers))) if answers[i].get("selectedOption") == correct_answers[i][0:1])
+        questions = quiz_data.get("questions", [])
+        
+        if not questions:
+            return jsonify({"error": "Quiz has no questions"}), 500
+            
+        score = 0
+        question_results = []
+        
+        for i in range(min(len(answers), len(questions))):
+            user_answer = answers[i].get("selectedOption", "")
+            correct_answer = questions[i].get("correctAnswer", "")
+            
+            is_correct = user_answer.upper() == correct_answer.upper()
+            if is_correct:
+                score += 1
+                
+            options = questions[i].get("options", [])
+            correct_option_text = ""
+            
+            if isinstance(options, list) and len(options) > 0:
+                if isinstance(options[0], dict):  
+                    for option in options:
+                        if option.get("letter") == correct_answer:
+                            correct_option_text = option.get("text", "")
+                            break
+            
+            question_results.append({
+                "questionNumber": i + 1,
+                "userAnswer": user_answer,
+                "correctAnswer": correct_answer,
+                "correctOptionText": correct_option_text,
+                "isCorrect": is_correct
+            })
+        
+        submission = {
+            "quizId": quizId,
+            "userId": userId,
+            "submittedAt": firestore.SERVER_TIMESTAMP,
+            "score": score,
+            "totalQuestions": len(questions),
+            "answers": answers,
+            "questionResults": question_results
+        }
+        
+        submission_id = str(uuid.uuid4())
+        db.collection('quiz_submissions').document(submission_id).set(submission)
         
         return jsonify({ 
+            "submissionId": submission_id,
             "score": score,
-            "totalQuestions": len(correct_answers)
+            "totalQuestions": len(questions),
+            "questionResults": question_results
         }), 200
 
     except Exception as e:
+        print(f"Error submitting quiz: {e}")
         return jsonify({"error": str(e)}), 500
 
 
