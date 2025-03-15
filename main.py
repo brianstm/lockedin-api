@@ -393,7 +393,6 @@ def gemini_generate(prompt, topic = "" ):
         "response": response.text
     })
 
-<<<<<<< HEAD
 @app.route('/quiz/generate', methods=['POST'])
 def generate_quiz():
     data = request.json
@@ -437,8 +436,7 @@ def generate_quiz():
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-=======
->>>>>>> a95ece68534135d8814bb29b6fe7b78527fe6dbc
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
