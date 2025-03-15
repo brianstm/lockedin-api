@@ -562,7 +562,6 @@ def get_quiz(quizId):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/quiz/submit', methods=['POST'])
 def submit_quiz():
     data = request.json
